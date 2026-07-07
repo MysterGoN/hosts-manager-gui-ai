@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-import hosts_manager_gui.core as hmg
+import hmg.core as hmg
 
 
 def test_host_entry_normalizes_domain_deduplicates_ips_and_selects_first_ip() -> None:

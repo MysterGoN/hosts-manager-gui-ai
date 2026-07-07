@@ -21,7 +21,7 @@ setup:
 	$(UV) sync --dev
 
 run:
-	$(UV) run python -m hosts_manager_gui
+	$(UV) run python -m hmg
 
 test:
 	$(UV) run pytest

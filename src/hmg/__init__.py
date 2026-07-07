@@ -1,4 +1,4 @@
-from hosts_manager_gui.core import (
+from hmg.core import (
     APP_NAME,
     INLINE_MARK,
     MANAGED_END,
@@ -26,7 +26,7 @@ from hosts_manager_gui.core import (
     validate_ip,
     write_hosts,
 )
-from hosts_manager_gui.ui import HostsApp, main
+from hmg.ui import HostsApp, main
 
 __all__ = [
     "APP_NAME",

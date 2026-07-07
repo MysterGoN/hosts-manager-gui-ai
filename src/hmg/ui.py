@@ -8,7 +8,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from hosts_manager_gui.core import (
+from hmg.core import (
     APP_NAME,
     EntryDiff,
     HostEntry,
@@ -426,7 +426,7 @@ class HostsApp(tk.Tk):
             messagebox.showerror(
                 APP_NAME,
                 "Недостаточно прав. Запустите приложение от администратора/root.\n\n"
-                "Пример для macOS/Linux:\n  sudo python -m hosts_manager_gui\n\n"
+                "Пример для macOS/Linux:\n  sudo python -m hmg\n\n"
                 "Windows: запустите Command Prompt/PowerShell от имени администратора.",
                 parent=self,
             )
@@ -453,7 +453,7 @@ class HostsApp(tk.Tk):
             messagebox.showerror(
                 APP_NAME,
                 "Недостаточно прав. Запустите приложение от администратора/root.\n\n"
-                "Пример для macOS/Linux:\n  sudo python -m hosts_manager_gui\n\n"
+                "Пример для macOS/Linux:\n  sudo python -m hmg\n\n"
                 "Windows: запустите Command Prompt/PowerShell от имени администратора.",
                 parent=self,
             )
