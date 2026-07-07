@@ -10,6 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from hmg.core import (
     APP_NAME,
+    ElevatedWriteError,
     EntryDiff,
     HostEntry,
     build_overwrite_hosts_text,
@@ -26,6 +27,7 @@ from hmg.core import (
     validate_domain,
     validate_ip,
     write_hosts,
+    write_hosts_elevated,
 )
 
 
@@ -287,7 +289,7 @@ class HostsApp(tk.Tk):
 
         hint = (
             "Подсказка: запись в /etc/hosts или Windows hosts обычно требует прав администратора. "
-            "Если сохранение не удалось, запустите приложение с sudo/от имени администратора."
+            "При сохранении приложение запросит их автоматически."
         )
         ttk.Label(root, text=hint).pack(fill=tk.X, pady=(8, 0))
 
@@ -419,17 +421,7 @@ class HostsApp(tk.Tk):
         try:
             original = read_hosts_file(self.hosts_file)
             content = build_preserve_hosts_text(original, self.entries)
-            backup = write_hosts(self.hosts_file, content)
-            save_state(self.entries)
-            messagebox.showinfo(APP_NAME, f"Сохранено. Резервная копия создана:\n{backup}", parent=self)
-        except PermissionError:
-            messagebox.showerror(
-                APP_NAME,
-                "Недостаточно прав. Запустите приложение от администратора/root.\n\n"
-                "Пример для macOS/Linux:\n  sudo python -m hmg\n\n"
-                "Windows: запустите Command Prompt/PowerShell от имени администратора.",
-                parent=self,
-            )
+            self.write_content(content, overwrite=False)
         except Exception as exc:
             messagebox.showerror(APP_NAME, f"Сохранение не удалось:\n{exc}", parent=self)
 
@@ -442,23 +434,32 @@ class HostsApp(tk.Tk):
             return
         try:
             content = build_overwrite_hosts_text(self.entries)
-            backup = write_hosts(self.hosts_file, content)
-            save_state(self.entries)
-            messagebox.showinfo(
-                APP_NAME,
-                f"Сохранено в режиме перезаписи. Резервная копия создана:\n{backup}",
-                parent=self,
-            )
-        except PermissionError:
-            messagebox.showerror(
-                APP_NAME,
-                "Недостаточно прав. Запустите приложение от администратора/root.\n\n"
-                "Пример для macOS/Linux:\n  sudo python -m hmg\n\n"
-                "Windows: запустите Command Prompt/PowerShell от имени администратора.",
-                parent=self,
-            )
+            self.write_content(content, overwrite=True)
         except Exception as exc:
             messagebox.showerror(APP_NAME, f"Сохранение не удалось:\n{exc}", parent=self)
+
+    def write_content(self, content: str, overwrite: bool) -> None:
+        try:
+            backup = write_hosts(self.hosts_file, content)
+        except PermissionError:
+            backup = self.write_content_elevated(content)
+        save_state(self.entries)
+        if overwrite:
+            message = f"Сохранено в режиме перезаписи. Резервная копия создана:\n{backup}"
+        else:
+            message = f"Сохранено. Резервная копия создана:\n{backup}"
+        messagebox.showinfo(APP_NAME, message, parent=self)
+
+    def write_content_elevated(self, content: str) -> Path:
+        message = (
+            "Для записи в файл hosts нужны права администратора.\n\nЗапросить права сейчас и продолжить сохранение?"
+        )
+        if not messagebox.askyesno(APP_NAME, message, icon="warning", parent=self):
+            raise PermissionError("Пользователь отменил запрос прав администратора")
+        try:
+            return write_hosts_elevated(self.hosts_file, content)
+        except ElevatedWriteError as exc:
+            raise PermissionError(f"Не удалось получить права администратора: {exc}") from exc
 
     def open_state_folder(self) -> None:
         folder = state_path().parent

@@ -1,3 +1,4 @@
+import platform
 from pathlib import Path
 
 import pytest
@@ -171,3 +172,37 @@ def test_write_hosts_creates_backup_and_writes_content(tmp_path: Path) -> None:
     assert backup.exists()
     assert backup.read_text(encoding="utf-8") == "old\n"
     assert hosts_path.read_text(encoding="utf-8") == "new\n"
+
+
+def test_elevated_write_shell_script_quotes_paths() -> None:
+    script = hmg.elevated_write_shell_script(
+        Path("/tmp/hosts dir/hosts"),
+        Path("/tmp/source file"),
+        Path("/tmp/hosts dir/hosts.backup"),
+    )
+
+    assert "mkdir -p '/tmp/hosts dir'" in script
+    assert "cp -p '/tmp/hosts dir/hosts' '/tmp/hosts dir/hosts.backup'" in script
+    assert "cat '/tmp/source file' > '/tmp/hosts dir/hosts'" in script
+
+
+def test_write_hosts_elevated_uses_platform_runner_and_removes_temp_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[Path, Path, Path]] = []
+
+    def fake_runner(path: Path, temp_path: Path, backup: Path) -> None:
+        calls.append((path, temp_path, backup))
+        assert temp_path.read_text(encoding="utf-8") == "new\n"
+
+    hosts_path = tmp_path / "hosts"
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(hmg, "run_elevated_write_macos", fake_runner)
+
+    backup = hmg.write_hosts_elevated(hosts_path, "new\n")
+
+    assert backup.name.startswith("hosts.")
+    assert backup.name.endswith(".bak")
+    assert calls == [(hosts_path, calls[0][1], backup)]
+    assert not calls[0][1].exists()

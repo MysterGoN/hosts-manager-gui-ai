@@ -6,7 +6,10 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
+import subprocess
+import tempfile
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -26,6 +29,10 @@ class EntryDiff(TypedDict):
     added_domains: list[str]
     added_ips: dict[str, list[str]]
     removed_domains: list[str]
+
+
+class ElevatedWriteError(RuntimeError):
+    pass
 
 
 def hosts_path() -> Path:
@@ -318,6 +325,104 @@ def write_hosts(path: Path, content: str) -> Path:
     with path.open("w", encoding="utf-8", newline="\n") as file:
         file.write(content)
     return backup
+
+
+def write_hosts_elevated(path: Path, content: str) -> Path:
+    backup = path.with_name(f"{path.name}.{now_stamp()}.bak")
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="\n", delete=False) as file:
+        file.write(content)
+        temp_path = Path(file.name)
+
+    try:
+        system = platform.system().lower()
+        if system == "darwin":
+            run_elevated_write_macos(path, temp_path, backup)
+        elif system.startswith("win"):
+            run_elevated_write_windows(path, temp_path, backup)
+        else:
+            run_elevated_write_linux(path, temp_path, backup)
+        return backup
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def elevated_write_shell_script(path: Path, temp_path: Path, backup: Path) -> str:
+    parent = shlex.quote(str(path.parent))
+    target = shlex.quote(str(path))
+    temp = shlex.quote(str(temp_path))
+    backup_path = shlex.quote(str(backup))
+    return (
+        f"mkdir -p {parent} && "
+        f"if test -e {target}; then cp -p {target} {backup_path}; else : > {backup_path}; fi && "
+        f"cat {temp} > {target}"
+    )
+
+
+def run_elevated_write_macos(path: Path, temp_path: Path, backup: Path) -> None:
+    script = elevated_write_shell_script(path, temp_path, backup)
+    result = subprocess.run(
+        ["osascript", "-e", f"do shell script {json.dumps(script)} with administrator privileges"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise ElevatedWriteError(result.stderr.strip() or result.stdout.strip() or "Administrator authorization failed")
+
+
+def run_elevated_write_linux(path: Path, temp_path: Path, backup: Path) -> None:
+    if shutil.which("pkexec") is None:
+        raise ElevatedWriteError("pkexec is not available")
+    script = elevated_write_shell_script(path, temp_path, backup)
+    result = subprocess.run(
+        ["pkexec", "sh", "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise ElevatedWriteError(result.stderr.strip() or result.stdout.strip() or "Administrator authorization failed")
+
+
+def run_elevated_write_windows(path: Path, temp_path: Path, backup: Path) -> None:
+    script_path = temp_path.with_suffix(".ps1")
+    script_path.write_text(
+        "\n".join(
+            [
+                "$ErrorActionPreference = 'Stop'",
+                f"$target = {json.dumps(str(path))}",
+                f"$temp = {json.dumps(str(temp_path))}",
+                f"$backup = {json.dumps(str(backup))}",
+                "New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null",
+                "if (Test-Path -LiteralPath $target) {",
+                "    Copy-Item -LiteralPath $target -Destination $backup -Force",
+                "} else {",
+                "    New-Item -ItemType File -Force -Path $backup | Out-Null",
+                "}",
+                "Copy-Item -LiteralPath $temp -Destination $target -Force",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    try:
+        script_arg = "'" + str(script_path).replace("'", "''") + "'"
+        command = (
+            "Start-Process -FilePath PowerShell "
+            f"-ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',{script_arg}) "
+            "-Verb RunAs -Wait"
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", command],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise ElevatedWriteError(
+                result.stderr.strip() or result.stdout.strip() or "Administrator authorization failed"
+            )
+    finally:
+        script_path.unlink(missing_ok=True)
 
 
 def merge_entries(

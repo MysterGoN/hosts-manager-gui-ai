@@ -4,6 +4,7 @@ from hmg.core import (
     MANAGED_END,
     MANAGED_START,
     STATE_VERSION,
+    ElevatedWriteError,
     HostEntry,
     build_managed_block,
     build_overwrite_hosts_text,
@@ -25,11 +26,13 @@ from hmg.core import (
     validate_domain,
     validate_ip,
     write_hosts,
+    write_hosts_elevated,
 )
 from hmg.ui import HostsApp, main
 
 __all__ = [
     "APP_NAME",
+    "ElevatedWriteError",
     "INLINE_MARK",
     "MANAGED_END",
     "MANAGED_START",
@@ -57,4 +60,5 @@ __all__ = [
     "validate_domain",
     "validate_ip",
     "write_hosts",
+    "write_hosts_elevated",
 ]
