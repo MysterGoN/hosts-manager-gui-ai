@@ -1,0 +1,43 @@
+[project]
+name = "hosts-manager-gui"
+version = "0.1.0"
+description = "Cross-platform GUI utility for managing hosts records."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.scripts]
+hosts-manager-gui = "hosts_manager_gui.ui:main"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.16",
+    "pre-commit>=4.2",
+    "pytest>=8.4",
+    "ruff>=0.12",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+mypy_path = "src"
+files = ["src", "tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hosts_manager_gui"]
