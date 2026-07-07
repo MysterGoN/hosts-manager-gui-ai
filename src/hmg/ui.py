@@ -30,6 +30,9 @@ from hmg.core import (
     write_hosts_elevated,
 )
 
+CHECKED = "☑"
+UNCHECKED = "☐"
+
 
 class ChangePreview(tk.Toplevel):
     def __init__(self, parent: tk.Tk, title: str, diff: EntryDiff, confirm_text: str = "Применить") -> None:
@@ -218,6 +221,7 @@ class HostsApp(tk.Tk):
 
         self.hosts_file = hosts_path()
         self.entries: dict[str, HostEntry] = {}
+        self.ip_editor: ttk.Combobox | None = None
 
         self.load_initial_data()
         self.create_widgets()
@@ -248,16 +252,21 @@ class HostsApp(tk.Tk):
         ttk.Label(top, text=f"Файл hosts: {self.hosts_file}").pack(side=tk.LEFT)
         ttk.Button(top, text="Обновить", command=self.reload).pack(side=tk.RIGHT)
 
-        columns = ("enabled", "selected_ip", "ips")
-        self.tree = ttk.Treeview(root, columns=columns, show="tree headings", selectmode="browse")
-        self.tree.heading("#0", text="Домен")
+        style = ttk.Style(self)
+        style.configure("Hosts.Treeview", rowheight=30)
+
+        columns = ("row_number", "enabled", "domain", "selected_ip")
+        self.tree = ttk.Treeview(root, columns=columns, show="headings", selectmode="browse")
+        self.tree.configure(style="Hosts.Treeview")
+        self.tree.heading("row_number", text="#")
         self.tree.heading("enabled", text="Включено")
-        self.tree.heading("selected_ip", text="Выбранный IP")
-        self.tree.heading("ips", text="Доступные IP")
-        self.tree.column("#0", width=270, minwidth=180)
-        self.tree.column("enabled", width=90, anchor="center")
-        self.tree.column("selected_ip", width=150)
-        self.tree.column("ips", width=420)
+        self.tree.heading("domain", text="Домен")
+        self.tree.heading("selected_ip", text="IP")
+        self.tree.column("row_number", width=52, minwidth=44, anchor="center", stretch=False)
+        self.tree.column("enabled", width=76, minwidth=76, anchor="center", stretch=False)
+        self.tree.column("domain", width=420, minwidth=220)
+        self.tree.column("selected_ip", width=220, minwidth=140)
+        self.tree.bind("<Button-1>", self.on_tree_click)
         self.tree.pack(fill=tk.BOTH, expand=True, pady=10)
 
         buttons = ttk.Frame(root)
@@ -266,9 +275,6 @@ class HostsApp(tk.Tk):
         ttk.Button(buttons, text="Добавить", command=self.add_entry).pack(side=tk.LEFT)
         ttk.Button(buttons, text="Изменить", command=self.edit_entry).pack(side=tk.LEFT, padx=4)
         ttk.Button(buttons, text="Удалить", command=self.delete_entry).pack(side=tk.LEFT)
-        ttk.Separator(buttons, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=8)
-        ttk.Button(buttons, text="Вкл / выкл", command=self.toggle_entry).pack(side=tk.LEFT)
-        ttk.Button(buttons, text="Выбрать IP", command=self.select_ip).pack(side=tk.LEFT, padx=4)
         ttk.Separator(buttons, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=8)
         ttk.Button(buttons, text="Импорт CSV: объединить", command=lambda: self.import_csv("merge")).pack(side=tk.LEFT)
         ttk.Button(buttons, text="Импорт CSV: заменить", command=lambda: self.import_csv("replace")).pack(
@@ -294,15 +300,71 @@ class HostsApp(tk.Tk):
         ttk.Label(root, text=hint).pack(fill=tk.X, pady=(8, 0))
 
     def refresh_table(self) -> None:
+        self.close_ip_editor()
         self.tree.delete(*self.tree.get_children())
-        for domain, entry in sorted(self.entries.items()):
+        for row_number, (domain, entry) in enumerate(sorted(self.entries.items()), start=1):
             self.tree.insert(
                 "",
                 tk.END,
                 iid=domain,
-                text=domain,
-                values=("да" if entry.enabled else "нет", entry.selected_ip, "; ".join(entry.ips)),
+                values=(row_number, CHECKED if entry.enabled else UNCHECKED, domain, entry.selected_ip),
             )
+
+    def on_tree_click(self, event: tk.Event[tk.Misc]) -> str | None:
+        if self.tree.identify("region", event.x, event.y) != "cell":  # type: ignore[no-untyped-call]
+            self.close_ip_editor()
+            return None
+
+        domain = self.tree.identify_row(event.y)
+        column = self.tree.identify_column(event.x)
+        if not domain:
+            self.close_ip_editor()
+            return None
+
+        self.tree.selection_set(domain)
+        if column == "#2":
+            self.entries[domain].enabled = not self.entries[domain].enabled
+            self.refresh_table()
+            self.tree.selection_set(domain)
+            return "break"
+        if column == "#4":
+            self.show_ip_editor(domain)
+            return "break"
+
+        self.close_ip_editor()
+        return None
+
+    def show_ip_editor(self, domain: str) -> None:
+        self.close_ip_editor()
+        entry = self.entries[domain]
+        bbox = self.tree.bbox(domain, "selected_ip")
+        if not bbox:
+            return
+
+        x, y, width, height = bbox
+        editor = ttk.Combobox(self.tree, values=entry.ips, state="readonly")
+        editor.set(entry.selected_ip)
+        editor.place(x=x, y=y, width=width, height=height)
+        editor.focus_set()
+        self.ip_editor = editor
+
+        def apply_selection() -> None:
+            selected_ip = editor.get()
+            if selected_ip in entry.ips:
+                entry.selected_ip = selected_ip
+                self.refresh_table()
+                self.tree.selection_set(domain)
+
+        editor.bind("<<ComboboxSelected>>", lambda _event: apply_selection())
+        editor.bind("<Return>", lambda _event: apply_selection())
+        editor.bind("<Escape>", lambda _event: self.close_ip_editor())
+        editor.bind("<FocusOut>", lambda _event: self.close_ip_editor())
+        editor.event_generate("<Button-1>")
+
+    def close_ip_editor(self) -> None:
+        if self.ip_editor is not None:
+            self.ip_editor.destroy()
+            self.ip_editor = None
 
     def selected_domain(self) -> str | None:
         sel = self.tree.selection()
