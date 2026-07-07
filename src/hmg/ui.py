@@ -31,8 +31,7 @@ from hmg.core import (
 )
 from hmg.logging import configure_logging, get_logger
 
-CHECKED = "☑"
-UNCHECKED = "☐"
+ENABLED_MARK = "🟢"
 logger = get_logger(__name__)
 
 
@@ -497,7 +496,7 @@ class HostsApp(tk.Tk):
                 "",
                 tk.END,
                 iid=domain,
-                values=(row_number, CHECKED if entry.enabled else UNCHECKED, domain, entry.selected_ip),
+                values=(row_number, ENABLED_MARK if entry.enabled else "", domain, entry.selected_ip),
             )
 
     def on_tree_click(self, event: tk.Event[tk.Misc]) -> str | None:
