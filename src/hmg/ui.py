@@ -29,9 +29,11 @@ from hmg.core import (
     write_hosts,
     write_hosts_elevated,
 )
+from hmg.logging import configure_logging, get_logger
 
 CHECKED = "☑"
 UNCHECKED = "☐"
+logger = get_logger(__name__)
 
 
 class ChangePreview(tk.Toplevel):
@@ -327,9 +329,11 @@ class ImportDialog(tk.Toplevel):
         )
         if not path_str:
             return
+        logger.info("import_file_selected", path=path_str)
         try:
             text = Path(path_str).read_text(encoding="utf-8-sig")
         except Exception as exc:
+            logger.warning("import_file_read_failed", path=path_str, error=str(exc))
             messagebox.showerror(APP_NAME, f"Не удалось прочитать файл:\n{exc}", parent=self)
             return
         self.import_text.delete("1.0", tk.END)
@@ -340,8 +344,10 @@ class ImportDialog(tk.Toplevel):
             text = self.import_text.get("1.0", tk.END)
             entries = parse_import_text(text)
         except Exception as exc:
+            logger.warning("import_dialog_parse_failed", error=str(exc))
             messagebox.showerror(APP_NAME, f"Импорт не удался:\n{exc}", parent=self)
             return
+        logger.info("import_dialog_accepted", mode=self.mode_var.get(), entries_count=len(entries))
         self.result = (self.mode_var.get(), entries)
         self.destroy()
 
@@ -408,12 +414,15 @@ class HostsApp(tk.Tk):
         self.load_initial_data()
         self.create_widgets()
         self.refresh_table()
+        logger.info("app_initialized", hosts_file=str(self.hosts_file), entries_count=len(self.entries))
 
     def load_initial_data(self) -> None:
+        logger.info("initial_data_load_started")
         state_entries = load_state()
         try:
             hosts_entries = parse_hosts_text(read_hosts_file(self.hosts_file))
         except Exception:
+            logger.exception("hosts_entries_load_failed", hosts_file=str(self.hosts_file))
             hosts_entries = {}
 
         self.entries = {}
@@ -426,6 +435,12 @@ class HostsApp(tk.Tk):
                 self.entries[domain] = state_entry
             else:
                 self.entries[domain] = entry
+        logger.info(
+            "initial_data_loaded",
+            state_entries_count=len(state_entries),
+            hosts_entries_count=len(hosts_entries),
+            visible_entries_count=len(self.entries),
+        )
 
     def create_widgets(self) -> None:
         root = ttk.Frame(self, padding=10)
@@ -555,6 +570,7 @@ class HostsApp(tk.Tk):
             parent=self,
         ):
             return
+        logger.info("reload_requested")
         self.load_initial_data()
         self.refresh_table()
 
@@ -572,6 +588,7 @@ class HostsApp(tk.Tk):
             )
         else:
             self.entries[entry.domain] = entry
+        logger.info("entry_added", domain=entry.domain, ips_count=len(entry.ips), entries_count=len(self.entries))
         self.refresh_table()
 
     def edit_entry(self) -> None:
@@ -591,6 +608,9 @@ class HostsApp(tk.Tk):
             new.selected_ip = old.selected_ip
         del self.entries[domain]
         self.entries[new.domain] = new
+        logger.info(
+            "entry_edited", old_domain=domain, new_domain=new.domain, ips_count=len(new.ips), enabled=new.enabled
+        )
         self.refresh_table()
         self.tree.selection_set(new.domain)
 
@@ -600,6 +620,7 @@ class HostsApp(tk.Tk):
             return
         if messagebox.askyesno(APP_NAME, f"Удалить {domain}?", parent=self):
             del self.entries[domain]
+            logger.info("entry_deleted", domain=domain, entries_count=len(self.entries))
             self.refresh_table()
 
     def toggle_entry(self) -> None:
@@ -607,6 +628,7 @@ class HostsApp(tk.Tk):
         if not domain:
             return
         self.entries[domain].enabled = not self.entries[domain].enabled
+        logger.info("entry_toggled", domain=domain, enabled=self.entries[domain].enabled)
         self.refresh_table()
         self.tree.selection_set(domain)
 
@@ -618,6 +640,7 @@ class HostsApp(tk.Tk):
         dlg = SelectIpDialog(self, entry)
         if dlg.result:
             entry.selected_ip = dlg.result
+            logger.info("entry_selected_ip_changed", domain=domain, selected_ip=entry.selected_ip)
             self.refresh_table()
             self.tree.selection_set(domain)
 
@@ -627,6 +650,7 @@ class HostsApp(tk.Tk):
             return
 
         mode, incoming = import_dialog.result
+        logger.info("import_requested", mode=mode, incoming_count=len(incoming))
         try:
             if mode == "merge":
                 new_entries, diff = merge_entries(self.entries, incoming)
@@ -637,6 +661,7 @@ class HostsApp(tk.Tk):
             else:
                 raise ValueError(f"Неизвестный режим импорта: {mode}")
         except Exception as exc:
+            logger.warning("import_failed", mode=mode, error=str(exc))
             messagebox.showerror(APP_NAME, f"Импорт не удался:\n{exc}", parent=self)
             return
 
@@ -645,6 +670,7 @@ class HostsApp(tk.Tk):
             self.entries = new_entries
             self.refresh_table()
             save_state(self.entries)
+            logger.info("import_applied", mode=mode, entries_count=len(self.entries))
             messagebox.showinfo(
                 APP_NAME,
                 "Импорт применен к локальному состоянию. Используйте сохранение, чтобы записать HMG-блок в hosts.",
@@ -654,6 +680,13 @@ class HostsApp(tk.Tk):
     def build_preview_texts(self) -> tuple[str, str]:
         original = read_hosts_file(self.hosts_file)
         content = build_preserve_hosts_text(original, self.entries)
+        logger.info(
+            "hosts_preview_built",
+            hosts_file=str(self.hosts_file),
+            before_bytes=len(original.encode("utf-8")),
+            after_bytes=len(content.encode("utf-8")),
+            entries_count=len(self.entries),
+        )
         return original, content
 
     def preview_hosts(self) -> None:
@@ -661,6 +694,7 @@ class HostsApp(tk.Tk):
             original, content = self.build_preview_texts()
             HostsDiffPreview(self, original, content)
         except Exception as exc:
+            logger.exception("hosts_preview_failed")
             messagebox.showerror(APP_NAME, f"Не удалось построить предпросмотр:\n{exc}", parent=self)
 
     def save_managed_block(self) -> None:
@@ -668,16 +702,20 @@ class HostsApp(tk.Tk):
             original, content = self.build_preview_texts()
             dlg = HostsDiffPreview(self, original, content, confirm_text="Сохранить")
             if dlg.result:
+                logger.info("hosts_save_confirmed", entries_count=len(self.entries))
                 self.write_content(content)
         except Exception as exc:
+            logger.exception("hosts_save_failed")
             messagebox.showerror(APP_NAME, f"Сохранение не удалось:\n{exc}", parent=self)
 
     def write_content(self, content: str) -> None:
         try:
             backup = write_hosts(self.hosts_file, content)
         except PermissionError:
+            logger.info("hosts_write_permission_denied", hosts_file=str(self.hosts_file))
             backup = self.write_content_elevated(content)
         save_state(self.entries)
+        logger.info("hosts_saved", hosts_file=str(self.hosts_file), backup=str(backup), entries_count=len(self.entries))
         messagebox.showinfo(APP_NAME, f"HMG-блок сохранен. Резервная копия создана:\n{backup}", parent=self)
 
     def write_content_elevated(self, content: str) -> Path:
@@ -685,10 +723,13 @@ class HostsApp(tk.Tk):
             "Для записи в файл hosts нужны права администратора.\n\nЗапросить права сейчас и продолжить сохранение?"
         )
         if not messagebox.askyesno(APP_NAME, message, icon="warning", parent=self):
+            logger.info("elevated_write_cancelled", hosts_file=str(self.hosts_file))
             raise PermissionError("Пользователь отменил запрос прав администратора")
         try:
+            logger.info("elevated_write_requested", hosts_file=str(self.hosts_file))
             return write_hosts_elevated(self.hosts_file, content)
         except ElevatedWriteError as exc:
+            logger.warning("elevated_write_failed", hosts_file=str(self.hosts_file), error=str(exc))
             raise PermissionError(f"Не удалось получить права администратора: {exc}") from exc
 
     def open_state_folder(self) -> None:
@@ -706,6 +747,10 @@ class HostsApp(tk.Tk):
 
 
 def main() -> int:
+    log_path = state_path().parent / "hmg.log"
+    configure_logging(log_path)
+    logger.info("app_starting", log_path=str(log_path))
     app = HostsApp()
     app.mainloop()
+    logger.info("app_stopped")
     return 0

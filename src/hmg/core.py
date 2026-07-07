@@ -16,6 +16,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TypedDict
 
+from hmg.logging import get_logger
+
 APP_NAME = "Hosts Manager GUI"
 STATE_VERSION = 1
 MANAGED_START = "###### HMG START ######"
@@ -23,6 +25,7 @@ MANAGED_END = "###### HMG END ######"
 INLINE_MARK = "# managed-by=hosts-manager-gui"
 
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?!-)[A-Za-z0-9_*.:-]{1,63}(?<!-)(?:\.(?!-)[A-Za-z0-9_*-]{1,63}(?<!-))*\.?$")
+logger = get_logger(__name__)
 
 
 class EntryDiff(TypedDict):
@@ -207,12 +210,14 @@ def parse_hosts_text(text: str) -> dict[str, HostEntry]:
                 if enabled:
                     entries[domain].selected_ip = ip
                     entries[domain].enabled = True
+    logger.info("hosts_text_parsed", entries_count=len(entries))
     return entries
 
 
 def load_state() -> dict[str, HostEntry]:
     path = state_path()
     if not path.exists():
+        logger.info("state_load_missing", path=str(path))
         return {}
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -225,8 +230,10 @@ def load_state() -> dict[str, HostEntry]:
                 enabled=bool(item.get("enabled", True)),
             )
             entries[entry.domain] = entry
+        logger.info("state_loaded", path=str(path), entries_count=len(entries))
         return entries
-    except Exception:
+    except Exception as exc:
+        logger.warning("state_load_failed", path=str(path), error=str(exc))
         return {}
 
 
@@ -240,12 +247,16 @@ def save_state(entries: dict[str, HostEntry]) -> None:
         "entries": [asdict(e) for e in sorted(entries.values(), key=lambda x: x.domain)],
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info("state_saved", path=str(path), entries_count=len(entries))
 
 
 def read_hosts_file(path: Path) -> str:
     if not path.exists():
+        logger.info("hosts_file_missing", path=str(path))
         return ""
-    return path.read_text(encoding="utf-8", errors="replace")
+    text = path.read_text(encoding="utf-8", errors="replace")
+    logger.info("hosts_file_read", path=str(path), bytes_count=len(text.encode("utf-8")))
+    return text
 
 
 def remove_managed_block(lines: list[str]) -> list[str]:
@@ -286,6 +297,7 @@ def build_preserve_hosts_text(original_text: str, entries: dict[str, HostEntry])
 
 
 def write_hosts(path: Path, content: str) -> Path:
+    logger.info("hosts_write_started", path=str(path), bytes_count=len(content.encode("utf-8")))
     path.parent.mkdir(parents=True, exist_ok=True)
     backup = path.with_name(f"{path.name}.{now_stamp()}.bak")
     if path.exists():
@@ -294,10 +306,12 @@ def write_hosts(path: Path, content: str) -> Path:
         backup.write_text("", encoding="utf-8")
     with path.open("w", encoding="utf-8", newline="\n") as file:
         file.write(content)
+    logger.info("hosts_write_finished", path=str(path), backup=str(backup))
     return backup
 
 
 def write_hosts_elevated(path: Path, content: str) -> Path:
+    logger.info("hosts_elevated_write_started", path=str(path), bytes_count=len(content.encode("utf-8")))
     backup = path.with_name(f"{path.name}.{now_stamp()}.bak")
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="\n", delete=False) as file:
         file.write(content)
@@ -311,6 +325,7 @@ def write_hosts_elevated(path: Path, content: str) -> Path:
             run_elevated_write_windows(path, temp_path, backup)
         else:
             run_elevated_write_linux(path, temp_path, backup)
+        logger.info("hosts_elevated_write_finished", path=str(path), backup=str(backup), platform=system)
         return backup
     finally:
         temp_path.unlink(missing_ok=True)
@@ -329,6 +344,7 @@ def elevated_write_shell_script(path: Path, temp_path: Path, backup: Path) -> st
 
 
 def run_elevated_write_macos(path: Path, temp_path: Path, backup: Path) -> None:
+    logger.info("hosts_elevated_write_platform", platform="macos", path=str(path), backup=str(backup))
     script = elevated_write_shell_script(path, temp_path, backup)
     result = subprocess.run(
         ["osascript", "-e", f"do shell script {json.dumps(script)} with administrator privileges"],
@@ -337,12 +353,15 @@ def run_elevated_write_macos(path: Path, temp_path: Path, backup: Path) -> None:
         text=True,
     )
     if result.returncode != 0:
+        logger.warning("hosts_elevated_write_failed", platform="macos", returncode=result.returncode)
         raise ElevatedWriteError(result.stderr.strip() or result.stdout.strip() or "Administrator authorization failed")
 
 
 def run_elevated_write_linux(path: Path, temp_path: Path, backup: Path) -> None:
     if shutil.which("pkexec") is None:
+        logger.warning("hosts_elevated_write_unavailable", platform="linux", tool="pkexec")
         raise ElevatedWriteError("pkexec is not available")
+    logger.info("hosts_elevated_write_platform", platform="linux", path=str(path), backup=str(backup))
     script = elevated_write_shell_script(path, temp_path, backup)
     result = subprocess.run(
         ["pkexec", "sh", "-c", script],
@@ -351,10 +370,12 @@ def run_elevated_write_linux(path: Path, temp_path: Path, backup: Path) -> None:
         text=True,
     )
     if result.returncode != 0:
+        logger.warning("hosts_elevated_write_failed", platform="linux", returncode=result.returncode)
         raise ElevatedWriteError(result.stderr.strip() or result.stdout.strip() or "Administrator authorization failed")
 
 
 def run_elevated_write_windows(path: Path, temp_path: Path, backup: Path) -> None:
+    logger.info("hosts_elevated_write_platform", platform="windows", path=str(path), backup=str(backup))
     script_path = temp_path.with_suffix(".ps1")
     script_path.write_text(
         "\n".join(
@@ -388,6 +409,7 @@ def run_elevated_write_windows(path: Path, temp_path: Path, backup: Path) -> Non
             text=True,
         )
         if result.returncode != 0:
+            logger.warning("hosts_elevated_write_failed", platform="windows", returncode=result.returncode)
             raise ElevatedWriteError(
                 result.stderr.strip() or result.stdout.strip() or "Administrator authorization failed"
             )
@@ -412,6 +434,14 @@ def merge_entries(
             if added:
                 added_ips[domain] = added
             # Keep enabled state and selected IP unchanged for existing domains.
+    logger.info(
+        "entries_merged",
+        base_count=len(base),
+        incoming_count=len(incoming),
+        result_count=len(result),
+        added_domains_count=len(added_domains),
+        changed_domains_count=len(added_ips),
+    )
     return result, {"added_domains": added_domains, "added_ips": added_ips, "removed_domains": []}
 
 
@@ -438,11 +468,22 @@ def replace_entries(
             result[domain] = current
         else:
             result[domain] = HostEntry(imported.domain, list(imported.ips), imported.selected_ip, True)
+    logger.info(
+        "entries_replaced",
+        base_count=len(base),
+        incoming_count=len(incoming),
+        result_count=len(result),
+        added_domains_count=len(added_domains),
+        removed_domains_count=len(removed_domains),
+        changed_domains_count=len(added_ips),
+    )
     return result, {"added_domains": added_domains, "removed_domains": removed_domains, "added_ips": added_ips}
 
 
 def parse_import_file(path: Path) -> dict[str, HostEntry]:
-    return parse_import_text(path.read_text(encoding="utf-8-sig"))
+    entries = parse_import_text(path.read_text(encoding="utf-8-sig"))
+    logger.info("import_file_parsed", path=str(path), entries_count=len(entries))
+    return entries
 
 
 def parse_csv_file(path: Path) -> dict[str, HostEntry]:
@@ -455,9 +496,13 @@ def parse_import_text(text: str) -> dict[str, HostEntry]:
 
     stripped = text.lstrip()
     if stripped.startswith("[") or stripped.startswith("{"):
-        return parse_json_import_text(text)
+        entries = parse_json_import_text(text)
+        logger.info("import_text_parsed", format="json", entries_count=len(entries))
+        return entries
 
-    return parse_delimited_import_text(text)
+    entries = parse_delimited_import_text(text)
+    logger.info("import_text_parsed", format="delimited", entries_count=len(entries))
+    return entries
 
 
 def parse_json_import_text(text: str) -> dict[str, HostEntry]:
