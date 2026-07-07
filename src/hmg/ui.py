@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import platform
@@ -13,7 +14,6 @@ from hmg.core import (
     ElevatedWriteError,
     EntryDiff,
     HostEntry,
-    build_overwrite_hosts_text,
     build_preserve_hosts_text,
     hosts_path,
     load_state,
@@ -95,6 +95,104 @@ class ChangePreview(tk.Toplevel):
         else:
             lines.append("  — нет")
         return lines
+
+    def ok(self) -> None:
+        self.result = True
+        self.destroy()
+
+    def cancel(self) -> None:
+        self.result = False
+        self.destroy()
+
+
+class HostsDiffPreview(tk.Toplevel):
+    def __init__(
+        self,
+        parent: tk.Tk,
+        before: str,
+        after: str,
+        confirm_text: str | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.title("Предпросмотр изменений hosts")
+        self.geometry("1100x700")
+        self.minsize(820, 520)
+        self.result = False
+        self.transient(parent)
+        self.grab_set()
+
+        root = ttk.Frame(self, padding=10)
+        root.pack(fill=tk.BOTH, expand=True)
+
+        header = ttk.Frame(root)
+        header.pack(fill=tk.X)
+        ttk.Label(header, text="Сейчас").pack(side=tk.LEFT, expand=True, fill=tk.X)
+        ttk.Label(header, text="После сохранения").pack(side=tk.LEFT, expand=True, fill=tk.X)
+
+        body = ttk.Frame(root)
+        body.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+        self.before_text = tk.Text(body, wrap="none", width=1, font=("Menlo", 12))
+        self.after_text = tk.Text(body, wrap="none", width=1, font=("Menlo", 12))
+        scroll = ttk.Scrollbar(body, orient="vertical", command=self.scroll_both)
+        self.before_text.configure(yscrollcommand=scroll.set)
+        self.after_text.configure(yscrollcommand=scroll.set)
+        self.before_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.after_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.configure_tags(self.before_text)
+        self.configure_tags(self.after_text)
+        self.insert_diff(before, after)
+
+        buttons = ttk.Frame(root)
+        buttons.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(buttons, text="Закрыть", command=self.cancel).pack(side=tk.RIGHT)
+        if confirm_text:
+            ttk.Button(buttons, text=confirm_text, command=self.ok).pack(side=tk.RIGHT, padx=(0, 8))
+
+        self.protocol("WM_DELETE_WINDOW", self.cancel)
+        self.wait_window(self)
+
+    @staticmethod
+    def configure_tags(widget: tk.Text) -> None:
+        widget.tag_configure("added", background="#d8f5d1")
+        widget.tag_configure("removed", background="#ffd9d9")
+        widget.tag_configure("changed", background="#fff3bf")
+
+    def insert_diff(self, before: str, after: str) -> None:
+        before_lines = before.splitlines()
+        after_lines = after.splitlines()
+        matcher = difflib.SequenceMatcher(a=before_lines, b=after_lines)
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            left = before_lines[i1:i2]
+            right = after_lines[j1:j2]
+            max_len = max(len(left), len(right))
+            for index in range(max_len):
+                before_line = left[index] if index < len(left) else ""
+                after_line = right[index] if index < len(right) else ""
+                line_tag = None
+                if tag == "delete":
+                    line_tag = "removed"
+                elif tag == "insert":
+                    line_tag = "added"
+                elif tag == "replace":
+                    line_tag = "changed"
+                self.append_line(self.before_text, before_line, line_tag)
+                self.append_line(self.after_text, after_line, line_tag)
+
+        self.before_text.configure(state="disabled")
+        self.after_text.configure(state="disabled")
+
+    @staticmethod
+    def append_line(widget: tk.Text, line: str, tag: str | None) -> None:
+        start = widget.index(tk.END)
+        widget.insert(tk.END, line + "\n")
+        if tag:
+            widget.tag_add(tag, start, widget.index(tk.END))
+
+    def scroll_both(self, *args: str) -> None:
+        self.before_text.yview(*args)
+        self.after_text.yview(*args)
 
     def ok(self) -> None:
         self.result = True
@@ -234,14 +332,16 @@ class HostsApp(tk.Tk):
         except Exception:
             hosts_entries = {}
 
-        # State keeps multi-IP candidates. Hosts file contributes new external records.
-        if state_entries:
-            self.entries = state_entries
-            for domain, entry in hosts_entries.items():
-                if domain not in self.entries:
-                    self.entries[domain] = entry
-        else:
-            self.entries = hosts_entries
+        self.entries = {}
+        for domain, entry in hosts_entries.items():
+            state_entry = state_entries.get(domain)
+            if state_entry:
+                state_entry.enabled = entry.enabled
+                state_entry.selected_ip = entry.selected_ip
+                state_entry.add_ips(entry.ips)
+                self.entries[domain] = state_entry
+            else:
+                self.entries[domain] = entry
 
     def create_widgets(self) -> None:
         root = ttk.Frame(self, padding=10)
@@ -284,13 +384,8 @@ class HostsApp(tk.Tk):
 
         save_buttons = ttk.Frame(root)
         save_buttons.pack(fill=tk.X, pady=(8, 0))
-        ttk.Button(save_buttons, text="Сохранить: оставить прочие строки", command=self.save_preserve).pack(
-            side=tk.LEFT
-        )
-        ttk.Button(save_buttons, text="Сохранить: перезаписать hosts", command=self.save_overwrite).pack(
-            side=tk.LEFT,
-            padx=4,
-        )
+        ttk.Button(save_buttons, text="Предпросмотр", command=self.preview_hosts).pack(side=tk.LEFT)
+        ttk.Button(save_buttons, text="Сохранить HMG-блок", command=self.save_managed_block).pack(side=tk.LEFT, padx=4)
         ttk.Button(save_buttons, text="Открыть папку состояния", command=self.open_state_folder).pack(side=tk.RIGHT)
 
         hint = (
@@ -475,42 +570,38 @@ class HostsApp(tk.Tk):
             save_state(self.entries)
             messagebox.showinfo(
                 APP_NAME,
-                "Импорт применен к локальному состоянию. Используйте сохранение, чтобы записать файл hosts.",
+                "Импорт применен к локальному состоянию. Используйте сохранение, чтобы записать HMG-блок в hosts.",
                 parent=self,
             )
 
-    def save_preserve(self) -> None:
+    def build_preview_texts(self) -> tuple[str, str]:
+        original = read_hosts_file(self.hosts_file)
+        content = build_preserve_hosts_text(original, self.entries)
+        return original, content
+
+    def preview_hosts(self) -> None:
         try:
-            original = read_hosts_file(self.hosts_file)
-            content = build_preserve_hosts_text(original, self.entries)
-            self.write_content(content, overwrite=False)
+            original, content = self.build_preview_texts()
+            HostsDiffPreview(self, original, content)
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, f"Не удалось построить предпросмотр:\n{exc}", parent=self)
+
+    def save_managed_block(self) -> None:
+        try:
+            original, content = self.build_preview_texts()
+            dlg = HostsDiffPreview(self, original, content, confirm_text="Сохранить")
+            if dlg.result:
+                self.write_content(content)
         except Exception as exc:
             messagebox.showerror(APP_NAME, f"Сохранение не удалось:\n{exc}", parent=self)
 
-    def save_overwrite(self) -> None:
-        warning = (
-            "Файл hosts будет полностью перезаписан только записями, показанными в приложении.\n\n"
-            "Сначала будет создана резервная копия. Продолжить?"
-        )
-        if not messagebox.askyesno(APP_NAME, warning, icon="warning", parent=self):
-            return
-        try:
-            content = build_overwrite_hosts_text(self.entries)
-            self.write_content(content, overwrite=True)
-        except Exception as exc:
-            messagebox.showerror(APP_NAME, f"Сохранение не удалось:\n{exc}", parent=self)
-
-    def write_content(self, content: str, overwrite: bool) -> None:
+    def write_content(self, content: str) -> None:
         try:
             backup = write_hosts(self.hosts_file, content)
         except PermissionError:
             backup = self.write_content_elevated(content)
         save_state(self.entries)
-        if overwrite:
-            message = f"Сохранено в режиме перезаписи. Резервная копия создана:\n{backup}"
-        else:
-            message = f"Сохранено. Резервная копия создана:\n{backup}"
-        messagebox.showinfo(APP_NAME, message, parent=self)
+        messagebox.showinfo(APP_NAME, f"HMG-блок сохранен. Резервная копия создана:\n{backup}", parent=self)
 
     def write_content_elevated(self, content: str) -> Path:
         message = (

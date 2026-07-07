@@ -55,7 +55,7 @@ def test_parse_hosts_line_can_read_disabled_managed_line() -> None:
     assert parsed == [("disabled.test", "127.0.0.1", False)]
 
 
-def test_parse_hosts_text_prefers_managed_block_when_present() -> None:
+def test_parse_hosts_text_reads_only_managed_block() -> None:
     text = "\n".join(
         [
             "127.0.0.1 unmanaged.test",
@@ -74,7 +74,13 @@ def test_parse_hosts_text_prefers_managed_block_when_present() -> None:
     assert not entries["disabled.test"].enabled
 
 
-def test_build_preserve_hosts_text_removes_conflicting_unmanaged_lines() -> None:
+def test_parse_hosts_text_ignores_hosts_without_managed_block() -> None:
+    entries = hmg.parse_hosts_text("127.0.0.1 unmanaged.test\n")
+
+    assert entries == {}
+
+
+def test_build_preserve_hosts_text_replaces_only_managed_block() -> None:
     original = "\n".join(
         [
             "127.0.0.1 localhost",
@@ -92,7 +98,7 @@ def test_build_preserve_hosts_text_removes_conflicting_unmanaged_lines() -> None
     rendered = hmg.build_preserve_hosts_text(original, entries)
 
     assert "127.0.0.1 localhost" in rendered
-    assert "192.168.1.10 example.test old-alias" not in rendered
+    assert "192.168.1.10 example.test old-alias" in rendered
     assert "10.0.0.2\texample.test\t# managed-by=hosts-manager-gui" in rendered
     assert "# 10.0.0.3\tdisabled.test\t# managed-by=hosts-manager-gui; disabled" in rendered
     assert "old-managed.test" not in rendered
