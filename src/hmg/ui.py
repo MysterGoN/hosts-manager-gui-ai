@@ -18,8 +18,8 @@ from hmg.core import (
     hosts_path,
     load_state,
     merge_entries,
-    parse_csv_file,
     parse_hosts_text,
+    parse_import_text,
     read_hosts_file,
     replace_entries,
     save_state,
@@ -266,6 +266,90 @@ class EntryDialog(tk.Toplevel):
         self.destroy()
 
 
+class ImportDialog(tk.Toplevel):
+    def __init__(self, parent: tk.Tk) -> None:
+        super().__init__(parent)
+        self.title("Импорт записей")
+        self.geometry("760x560")
+        self.minsize(640, 460)
+        self.transient(parent)
+        self.grab_set()
+        self.result: tuple[str, dict[str, HostEntry]] | None = None
+
+        root = ttk.Frame(self, padding=12)
+        root.pack(fill=tk.BOTH, expand=True)
+
+        mode_frame = ttk.LabelFrame(root, text="Режим")
+        mode_frame.pack(fill=tk.X)
+        self.mode_var = tk.StringVar(value="merge")
+        ttk.Radiobutton(mode_frame, text="Обновить", value="merge", variable=self.mode_var).pack(
+            side=tk.LEFT,
+            padx=(8, 16),
+            pady=8,
+        )
+        ttk.Radiobutton(mode_frame, text="Заменить", value="replace", variable=self.mode_var).pack(
+            side=tk.LEFT,
+            pady=8,
+        )
+
+        ttk.Label(root, text="Текст для импорта").pack(anchor="w", pady=(12, 4))
+        text_frame = ttk.Frame(root)
+        text_frame.pack(fill=tk.BOTH, expand=True)
+        self.import_text = tk.Text(text_frame, wrap="none", height=14)
+        y_scroll = ttk.Scrollbar(text_frame, orient="vertical", command=self.import_text.yview)
+        x_scroll = ttk.Scrollbar(text_frame, orient="horizontal", command=self.import_text.xview)
+        self.import_text.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        self.import_text.grid(row=0, column=0, sticky="nsew")
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        text_frame.rowconfigure(0, weight=1)
+        text_frame.columnconfigure(0, weight=1)
+
+        buttons = ttk.Frame(root)
+        buttons.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(buttons, text="Импорт из файла", command=self.load_file).pack(side=tk.LEFT)
+        ttk.Button(buttons, text="Отмена", command=self.cancel).pack(side=tk.RIGHT)
+        ttk.Button(buttons, text="Импорт", command=self.ok).pack(side=tk.RIGHT, padx=(0, 8))
+
+        self.protocol("WM_DELETE_WINDOW", self.cancel)
+        self.wait_window(self)
+
+    def load_file(self) -> None:
+        path_str = filedialog.askopenfilename(
+            parent=self,
+            title="Импорт записей",
+            filetypes=[
+                ("Поддерживаемые файлы", "*.csv *.tsv *.json *.txt"),
+                ("CSV/TSV", "*.csv *.tsv"),
+                ("JSON", "*.json"),
+                ("Все файлы", "*.*"),
+            ],
+        )
+        if not path_str:
+            return
+        try:
+            text = Path(path_str).read_text(encoding="utf-8-sig")
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, f"Не удалось прочитать файл:\n{exc}", parent=self)
+            return
+        self.import_text.delete("1.0", tk.END)
+        self.import_text.insert("1.0", text)
+
+    def ok(self) -> None:
+        try:
+            text = self.import_text.get("1.0", tk.END)
+            entries = parse_import_text(text)
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, f"Импорт не удался:\n{exc}", parent=self)
+            return
+        self.result = (self.mode_var.get(), entries)
+        self.destroy()
+
+    def cancel(self) -> None:
+        self.result = None
+        self.destroy()
+
+
 class SelectIpDialog(tk.Toplevel):
     def __init__(self, parent: tk.Tk, entry: HostEntry) -> None:
         super().__init__(parent)
@@ -376,11 +460,7 @@ class HostsApp(tk.Tk):
         ttk.Button(buttons, text="Изменить", command=self.edit_entry).pack(side=tk.LEFT, padx=4)
         ttk.Button(buttons, text="Удалить", command=self.delete_entry).pack(side=tk.LEFT)
         ttk.Separator(buttons, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=8)
-        ttk.Button(buttons, text="Импорт CSV: объединить", command=lambda: self.import_csv("merge")).pack(side=tk.LEFT)
-        ttk.Button(buttons, text="Импорт CSV: заменить", command=lambda: self.import_csv("replace")).pack(
-            side=tk.LEFT,
-            padx=4,
-        )
+        ttk.Button(buttons, text="Импорт", command=self.import_entries).pack(side=tk.LEFT)
 
         save_buttons = ttk.Frame(root)
         save_buttons.pack(fill=tk.X, pady=(8, 0))
@@ -541,30 +621,27 @@ class HostsApp(tk.Tk):
             self.refresh_table()
             self.tree.selection_set(domain)
 
-    def import_csv(self, mode: str) -> None:
-        path_str = filedialog.askopenfilename(
-            parent=self,
-            title="Импорт CSV hosts",
-            filetypes=[("CSV-файлы", "*.csv"), ("Все файлы", "*.*")],
-        )
-        if not path_str:
+    def import_entries(self) -> None:
+        import_dialog = ImportDialog(self)
+        if not import_dialog.result:
             return
+
+        mode, incoming = import_dialog.result
         try:
-            incoming = parse_csv_file(Path(path_str))
             if mode == "merge":
                 new_entries, diff = merge_entries(self.entries, incoming)
-                title = "Предпросмотр импорта CSV: объединение"
+                title = "Предпросмотр импорта: обновление"
             elif mode == "replace":
                 new_entries, diff = replace_entries(self.entries, incoming)
-                title = "Предпросмотр импорта CSV: замена"
+                title = "Предпросмотр импорта: замена"
             else:
                 raise ValueError(f"Неизвестный режим импорта: {mode}")
         except Exception as exc:
             messagebox.showerror(APP_NAME, f"Импорт не удался:\n{exc}", parent=self)
             return
 
-        dlg = ChangePreview(self, title, diff, confirm_text="Применить импорт")
-        if dlg.result:
+        preview_dialog = ChangePreview(self, title, diff, confirm_text="Применить импорт")
+        if preview_dialog.result:
             self.entries = new_entries
             self.refresh_table()
             save_state(self.entries)

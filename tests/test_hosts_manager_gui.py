@@ -125,6 +125,27 @@ def test_parse_csv_file_merges_duplicate_domains(tmp_path: Path) -> None:
     assert entries["example.test"].ips == ["127.0.0.1", "192.168.1.10"]
 
 
+def test_parse_import_text_supports_whitespace_delimiter() -> None:
+    entries = hmg.parse_import_text("example.test     127.0.0.1\nother.test ::1\n")
+
+    assert entries["example.test"].ips == ["127.0.0.1"]
+    assert entries["other.test"].ips == ["::1"]
+
+
+def test_parse_import_text_supports_tsv_and_semicolon_delimiters() -> None:
+    tsv_entries = hmg.parse_import_text("example.test\t127.0.0.1\n")
+    semicolon_entries = hmg.parse_import_text("example.test;127.0.0.1\n")
+
+    assert tsv_entries["example.test"].ips == ["127.0.0.1"]
+    assert semicolon_entries["example.test"].ips == ["127.0.0.1"]
+
+
+def test_parse_import_text_supports_json_array() -> None:
+    entries = hmg.parse_import_text('[{"domain": "example.test", "ip": "127.0.0.1"}]')
+
+    assert entries["example.test"].ips == ["127.0.0.1"]
+
+
 def test_merge_entries_keeps_existing_state_and_adds_new_ips() -> None:
     base = {
         "example.test": hmg.HostEntry(

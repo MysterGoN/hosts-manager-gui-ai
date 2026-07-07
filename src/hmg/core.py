@@ -441,20 +441,52 @@ def replace_entries(
     return result, {"added_domains": added_domains, "removed_domains": removed_domains, "added_ips": added_ips}
 
 
-def parse_csv_file(path: Path) -> dict[str, HostEntry]:
-    text = path.read_text(encoding="utf-8-sig")
-    if not text.strip():
-        raise ValueError("CSV file is empty")
+def parse_import_file(path: Path) -> dict[str, HostEntry]:
+    return parse_import_text(path.read_text(encoding="utf-8-sig"))
 
+
+def parse_csv_file(path: Path) -> dict[str, HostEntry]:
+    return parse_import_file(path)
+
+
+def parse_import_text(text: str) -> dict[str, HostEntry]:
+    if not text.strip():
+        raise ValueError("Import text is empty")
+
+    stripped = text.lstrip()
+    if stripped.startswith("[") or stripped.startswith("{"):
+        return parse_json_import_text(text)
+
+    return parse_delimited_import_text(text)
+
+
+def parse_json_import_text(text: str) -> dict[str, HostEntry]:
+    payload = json.loads(text)
+    if not isinstance(payload, list):
+        raise ValueError("JSON import must be an array of objects")
+
+    entries: dict[str, HostEntry] = {}
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValueError("JSON import items must be objects")
+        domain_raw = item.get("domain")
+        ip_raw = item.get("ip", item.get("ips"))
+        if not isinstance(domain_raw, str) or not isinstance(ip_raw, str):
+            raise ValueError(f"Bad JSON import item: {item}")
+        add_import_row(entries, domain_raw, ip_raw)
+    return entries
+
+
+def parse_delimited_import_text(text: str) -> dict[str, HostEntry]:
     sample = text[:2048]
     try:
         dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
     except csv.Error:
-        dialect = csv.excel
+        dialect = None
 
-    rows = list(csv.reader(text.splitlines(), dialect))
+    rows = list(csv.reader(text.splitlines(), dialect)) if dialect else split_whitespace_rows(text)
     if not rows:
-        raise ValueError("CSV file contains no rows")
+        raise ValueError("Import text contains no rows")
 
     header = [c.strip().lower() for c in rows[0]]
     has_header = "domain" in header and ("ip" in header or "ips" in header)
@@ -467,25 +499,39 @@ def parse_csv_file(path: Path) -> dict[str, HostEntry]:
             if not row or all(not c.strip() for c in row):
                 continue
             if len(row) <= max(domain_idx, ip_idx):
-                raise ValueError(f"Bad CSV row: {row}")
+                raise ValueError(f"Bad import row: {row}")
             data_rows.append((row[domain_idx], row[ip_idx]))
     else:
         for row in rows:
             if not row or all(not c.strip() for c in row):
                 continue
             if len(row) < 2:
-                raise ValueError(f"Bad CSV row without header: {row}")
+                raise ValueError(f"Bad import row without header: {row}")
             data_rows.append((row[0], row[1]))
 
     entries: dict[str, HostEntry] = {}
     for domain_raw, ips_raw in data_rows:
-        domain = validate_domain(domain_raw)
-        ips = split_ips(ips_raw)
-        if not ips:
-            raise ValueError(f"No IPs for domain {domain}")
-        ips = [validate_ip(ip) for ip in ips]
-        if domain not in entries:
-            entries[domain] = HostEntry(domain=domain, ips=ips, selected_ip=ips[0], enabled=True)
-        else:
-            entries[domain].add_ips(ips)
+        add_import_row(entries, domain_raw, ips_raw)
     return entries
+
+
+def split_whitespace_rows(text: str) -> list[list[str]]:
+    rows: list[list[str]] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        rows.append(re.split(r"\s+", stripped, maxsplit=1))
+    return rows
+
+
+def add_import_row(entries: dict[str, HostEntry], domain_raw: str, ips_raw: str) -> None:
+    domain = validate_domain(domain_raw)
+    ips = split_ips(ips_raw)
+    if not ips:
+        raise ValueError(f"No IPs for domain {domain}")
+    ips = [validate_ip(ip) for ip in ips]
+    if domain not in entries:
+        entries[domain] = HostEntry(domain=domain, ips=ips, selected_ip=ips[0], enabled=True)
+    else:
+        entries[domain].add_ips(ips)
