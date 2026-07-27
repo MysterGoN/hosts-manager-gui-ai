@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import difflib
 import re
+import shutil
 import signal
 import sys
 from pathlib import Path
@@ -41,6 +42,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QRadioButton,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -69,6 +71,16 @@ from hmg.core import (
     write_hosts_elevated,
 )
 from hmg.logging import configure_logging, get_logger
+from hmg.settings import (
+    LOG_LEVELS,
+    AppSettings,
+    default_data_dir,
+    default_log_dir,
+    get_settings,
+    is_packaged,
+    save_settings,
+    settings_file_path,
+)
 from hmg.sources import (
     Origins,
     PairOrigin,
@@ -133,6 +145,7 @@ QGroupBox::title {
     left: 14px;
     padding: 0 6px;
 }
+QGroupBox QLabel, QGroupBox QCheckBox { background: transparent; }
 QPushButton {
     min-height: 38px;
     padding: 0 16px;
@@ -282,6 +295,8 @@ class DiffTextEdit(QPlainTextEdit):
 
 def dialog_buttons(parent: QDialog, confirm_text: str) -> QDialogButtonBox:
     buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+    cancel = buttons.button(QDialogButtonBox.StandardButton.Cancel)
+    cancel.setText("Отмена")
     confirm = buttons.addButton(confirm_text, QDialogButtonBox.ButtonRole.AcceptRole)
     confirm.setObjectName("primary")
     buttons.accepted.connect(parent.accept)
@@ -871,6 +886,112 @@ class SourcesDialog(QDialog):
         self.accept()
 
 
+class SettingsDialog(QDialog):
+    def __init__(self, parent: QWidget, settings: AppSettings) -> None:
+        super().__init__(parent)
+        self.result_settings: AppSettings | None = None
+        self.setWindowTitle("Настройки")
+        self.resize(720, 560)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        title = QLabel("Настройки")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+
+        paths = QGroupBox("Хранение данных")
+        paths_form = QFormLayout(paths)
+        self.data_dir_edit = QLineEdit(settings.data_dir)
+        paths_form.addRow("Каталог данных", self._path_picker(self.data_dir_edit))
+        data_hint = QLabel("Здесь хранятся state.json и sources.json")
+        data_hint.setObjectName("hint")
+        paths_form.addRow("", data_hint)
+        config_hint = QLabel(f"Основной конфиг: {settings_file_path()}")
+        config_hint.setObjectName("hint")
+        config_hint.setWordWrap(True)
+        paths_form.addRow("", config_hint)
+        defaults = QPushButton("Вернуть системные каталоги")
+        defaults.clicked.connect(self.restore_default_paths)
+        paths_form.addRow("", defaults)
+        layout.addWidget(paths)
+
+        logs = QGroupBox("Логи")
+        logs_form = QFormLayout(logs)
+        self.log_dir_edit = QLineEdit(settings.log_dir)
+        logs_form.addRow("Каталог логов", self._path_picker(self.log_dir_edit))
+        self.log_level_combo = QComboBox()
+        self.log_level_combo.addItems(LOG_LEVELS)
+        self.log_level_combo.setCurrentText(settings.log_level)
+        logs_form.addRow("Уровень", self.log_level_combo)
+        self.log_size_spin = QSpinBox()
+        self.log_size_spin.setRange(1, 1024)
+        self.log_size_spin.setSuffix(" МБ")
+        self.log_size_spin.setValue(max(1, settings.log_max_bytes // (1024 * 1024)))
+        logs_form.addRow("Размер одного файла", self.log_size_spin)
+        self.log_backups_spin = QSpinBox()
+        self.log_backups_spin.setRange(1, 100)
+        self.log_backups_spin.setValue(settings.log_backup_count)
+        logs_form.addRow("Количество архивов", self.log_backups_spin)
+        self.log_days_spin = QSpinBox()
+        self.log_days_spin.setRange(1, 3650)
+        self.log_days_spin.setSuffix(" дней")
+        self.log_days_spin.setValue(settings.log_retention_days)
+        logs_form.addRow("Срок хранения", self.log_days_spin)
+        self.dev_file_check = QCheckBox("Писать в файл также в режиме разработки")
+        self.dev_file_check.setChecked(settings.log_to_file_in_dev)
+        logs_form.addRow("", self.dev_file_check)
+        mode_hint = QLabel(
+            "Текущий режим: packaged — только файл"
+            if is_packaged()
+            else "Текущий режим: development — stdout"
+        )
+        mode_hint.setObjectName("hint")
+        logs_form.addRow("", mode_hint)
+        layout.addWidget(logs)
+
+        buttons = dialog_buttons(self, "Сохранить")
+        buttons.accepted.disconnect()
+        buttons.accepted.connect(self.validate_and_accept)
+        layout.addWidget(buttons)
+
+    def _path_picker(self, line_edit: QLineEdit) -> QWidget:
+        widget = QWidget()
+        row = QHBoxLayout(widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(line_edit, 1)
+        browse = QPushButton("Выбрать")
+        browse.clicked.connect(lambda: self.choose_directory(line_edit))
+        row.addWidget(browse)
+        return widget
+
+    def choose_directory(self, line_edit: QLineEdit) -> None:
+        selected = QFileDialog.getExistingDirectory(self, "Выберите каталог", line_edit.text())
+        if selected:
+            line_edit.setText(selected)
+
+    def restore_default_paths(self) -> None:
+        self.data_dir_edit.setText(str(default_data_dir()))
+        self.log_dir_edit.setText(str(default_log_dir()))
+
+    def validate_and_accept(self) -> None:
+        settings = AppSettings(
+            data_dir=self.data_dir_edit.text().strip(),
+            log_dir=self.log_dir_edit.text().strip(),
+            log_level=self.log_level_combo.currentText(),
+            log_max_bytes=self.log_size_spin.value() * 1024 * 1024,
+            log_backup_count=self.log_backups_spin.value(),
+            log_retention_days=self.log_days_spin.value(),
+            log_to_file_in_dev=self.dev_file_check.isChecked(),
+        )
+        try:
+            settings.validate()
+        except ValueError as exc:
+            QMessageBox.warning(self, APP_NAME, str(exc))
+            return
+        self.result_settings = settings
+        self.accept()
+
+
 class HostsApp(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -937,6 +1058,9 @@ class HostsApp(QMainWindow):
         refresh = QPushButton("Обновить")
         refresh.clicked.connect(self.reload)
         header.addWidget(refresh)
+        settings_button = QPushButton("Настройки")
+        settings_button.clicked.connect(self.manage_settings)
+        header.addWidget(settings_button)
         root.addLayout(header)
 
         file_card = QFrame()
@@ -1234,6 +1358,49 @@ class HostsApp(QMainWindow):
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
             QMessageBox.information(self, APP_NAME, f"Папка состояния:\n{folder}")
 
+    def manage_settings(self) -> None:
+        current = get_settings()
+        dialog = SettingsDialog(self, current)
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.result_settings is None:
+            return
+        updated = dialog.result_settings
+
+        if updated.data_path != current.data_path:
+            answer = QMessageBox.question(
+                self,
+                APP_NAME,
+                "Скопировать текущие файлы данных в новый каталог?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                try:
+                    self.copy_data_files(current.data_path, updated.data_path)
+                except OSError as exc:
+                    QMessageBox.critical(self, APP_NAME, f"Не удалось скопировать данные:\n{exc}")
+                    return
+        try:
+            updated.data_path.mkdir(parents=True, exist_ok=True)
+            if is_packaged() or updated.log_to_file_in_dev:
+                updated.log_path.mkdir(parents=True, exist_ok=True)
+            save_settings(updated)
+            log_path = configure_logging(updated)
+        except OSError as exc:
+            QMessageBox.critical(self, APP_NAME, f"Не удалось сохранить настройки:\n{exc}")
+            return
+        logger.info("settings_updated", data_dir=updated.data_dir, log_dir=updated.log_dir)
+        destination = str(log_path) if log_path else "stderr"
+        QMessageBox.information(self, APP_NAME, f"Настройки сохранены.\nТекущий вывод логов: {destination}")
+
+    @staticmethod
+    def copy_data_files(source_dir: Path, destination_dir: Path) -> None:
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        for filename in ("state.json", "sources.json"):
+            source = source_dir / filename
+            destination = destination_dir / filename
+            if source.exists() and not destination.exists():
+                shutil.copy2(source, destination)
+
     def manage_sources(self) -> None:
         previous_sources = {source.id: source for source in self.sources}
         dialog = SourcesDialog(self, self.sources)
@@ -1335,9 +1502,14 @@ class HostsApp(QMainWindow):
 
 
 def main() -> int:
-    log_path = state_path().parent / "hmg.log"
-    configure_logging(log_path)
-    logger.info("app_starting", log_path=str(log_path))
+    settings = get_settings()
+    log_path = configure_logging(settings)
+    logger.info(
+        "app_starting",
+        mode="packaged" if is_packaged() else "development",
+        log_path=str(log_path) if log_path else None,
+        data_dir=settings.data_dir,
+    )
     application = QApplication.instance()
     if application is None:
         application = QApplication(sys.argv)

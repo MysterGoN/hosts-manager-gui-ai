@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from hmg.logging import get_logger
+from hmg.settings import get_settings
 
 APP_NAME = "Hosts Manager GUI"
 STATE_VERSION = 1
@@ -46,12 +47,7 @@ def hosts_path() -> Path:
 
 
 def state_path() -> Path:
-    if platform.system().lower().startswith("win"):
-        base = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")))
-        return base / "HostsManagerGUI" / "state.json"
-    if platform.system().lower() == "darwin":
-        return Path.home() / "Library" / "Application Support" / "HostsManagerGUI" / "state.json"
-    return Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "hosts-manager-gui" / "state.json"
+    return get_settings().data_path / "state.json"
 
 
 def now_stamp() -> str:

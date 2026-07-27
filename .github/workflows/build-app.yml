@@ -1,0 +1,60 @@
+name: Build desktop application
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+            artifact: hosts-manager-gui-linux
+            path: dist/hosts-manager-gui
+          - name: Windows
+            os: windows-latest
+            artifact: hosts-manager-gui-windows
+            path: dist/hosts-manager-gui.exe
+          - name: macOS
+            os: macos-latest
+            artifact: hosts-manager-gui-macos
+            path: dist/hosts-manager-gui
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install Python
+        run: uv python install 3.14
+
+      - name: Install dependencies
+        run: uv sync --dev --frozen
+
+      - name: Run lint
+        run: uv run ruff check .
+
+      - name: Run type checks
+        run: uv run mypy src tests
+
+      - name: Run tests
+        run: uv run pytest
+
+      - name: Build one-file application
+        run: uv run pyinstaller --noconfirm --clean packaging/hosts-manager-gui.spec
+
+      - name: Upload application
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.path }}
+          if-no-files-found: error

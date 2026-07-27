@@ -6,6 +6,7 @@ import pytest
 
 import hmg.core as hmg
 from hmg.ui import (
+    HostsApp,
     build_side_by_side_diff,
     entries_snapshot,
     format_diff_status,
@@ -313,3 +314,18 @@ def test_entries_snapshot_tracks_all_editable_host_state() -> None:
     assert entries_snapshot(entries) == (
         ("example.test", ("127.0.0.1", "10.0.0.1"), "10.0.0.1", False),
     )
+
+
+def test_copy_data_files_preserves_existing_destination_files(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+    (source / "state.json").write_text("new state", encoding="utf-8")
+    (source / "sources.json").write_text("new sources", encoding="utf-8")
+    (destination / "state.json").write_text("existing state", encoding="utf-8")
+
+    HostsApp.copy_data_files(source, destination)
+
+    assert (destination / "state.json").read_text(encoding="utf-8") == "existing state"
+    assert (destination / "sources.json").read_text(encoding="utf-8") == "new sources"

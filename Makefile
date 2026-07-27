@@ -1,7 +1,10 @@
 PYTHON ?= python
 UV ?= uv
+DOCKER_PLATFORM ?= linux/amd64
+DOCKER_ARCH ?= amd64
+DOCKER_PYTHON_IMAGE ?= python:3.14-bookworm
 
-.PHONY: help setup run test lint format typecheck check pre-commit install-hooks build clean
+.PHONY: help setup run test lint format typecheck check pre-commit install-hooks build build-app build-linux-docker build-linux-arm64-docker build-linux-docker-all clean
 
 help:
 	@printf "Доступные цели:\n"
@@ -15,6 +18,10 @@ help:
 	@printf "  pre-commit     Запустить все pre-commit хуки для всех файлов\n"
 	@printf "  install-hooks  Установить git hooks pre-commit\n"
 	@printf "  build          Собрать sdist и wheel\n"
+	@printf "  build-app      Собрать исполняемое приложение для текущей ОС\n"
+	@printf "  build-linux-docker      Собрать Linux-бинарник выбранной архитектуры\n"
+	@printf "  build-linux-arm64-docker Собрать Linux ARM64-бинарник\n"
+	@printf "  build-linux-docker-all  Собрать Linux-бинарники amd64 и arm64\n"
 	@printf "  clean          Удалить локальные build/cache артефакты\n"
 
 setup:
@@ -46,6 +53,26 @@ install-hooks:
 
 build:
 	$(UV) build
+
+build-app:
+	$(UV) run pyinstaller --noconfirm --clean packaging/hosts-manager-gui.spec
+
+build-linux-docker:
+	docker buildx build \
+		--platform $(DOCKER_PLATFORM) \
+		--build-arg PYTHON_IMAGE=$(DOCKER_PYTHON_IMAGE) \
+		--target artifact \
+		--output type=local,dest=dist/docker/linux-$(DOCKER_ARCH) \
+		.
+
+build-linux-arm64-docker:
+	$(MAKE) build-linux-docker \
+		DOCKER_PLATFORM=linux/arm64 \
+		DOCKER_ARCH=arm64 \
+		DOCKER_PYTHON_IMAGE=python:3.14-trixie
+
+build-linux-docker-all:
+	docker buildx bake linux
 
 clean:
 	rm -rf .mypy_cache .pytest_cache .ruff_cache build dist *.egg-info
