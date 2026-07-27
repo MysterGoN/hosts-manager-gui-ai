@@ -5,12 +5,17 @@ from pathlib import Path
 import pytest
 
 import hmg.core as hmg
+import hmg.ui as ui_module
+from hmg.sources import Origins, PairOrigin, UrlSource
 from hmg.ui import (
     HostsApp,
     build_side_by_side_diff,
+    delete_entries_by_domain,
+    delete_entries_from_internal_state,
     entries_snapshot,
     format_diff_status,
     format_numbered_diff_side,
+    reconcile_persisted_entries,
     summarize_diff_rows,
 )
 
@@ -314,6 +319,132 @@ def test_entries_snapshot_tracks_all_editable_host_state() -> None:
     assert entries_snapshot(entries) == (
         ("example.test", ("127.0.0.1", "10.0.0.1"), "10.0.0.1", False),
     )
+
+
+def test_reconcile_persisted_entries_keeps_state_not_yet_applied_to_hosts() -> None:
+    state_entries = {
+        "existing.test": hmg.HostEntry("existing.test", ["127.0.0.1"]),
+        "pending.test": hmg.HostEntry("pending.test", ["10.0.0.1"]),
+    }
+    hosts_entries = {"existing.test": hmg.HostEntry("existing.test", ["127.0.0.1"])}
+
+    desired, applied = reconcile_persisted_entries(state_entries, hosts_entries)
+
+    assert set(desired) == {"existing.test", "pending.test"}
+    assert set(applied) == {"existing.test"}
+    assert entries_snapshot(desired) != entries_snapshot(applied)
+
+
+def test_reconcile_persisted_entries_keeps_intentionally_empty_state() -> None:
+    hosts_entries = {"deleted.test": hmg.HostEntry("deleted.test", ["127.0.0.1"])}
+
+    desired, applied = reconcile_persisted_entries(
+        {},
+        hosts_entries,
+        state_available=True,
+    )
+
+    assert desired == {}
+    assert set(applied) == {"deleted.test"}
+
+
+def test_reconcile_persisted_entries_uses_hosts_when_state_file_is_missing() -> None:
+    hosts_entries = {"existing.test": hmg.HostEntry("existing.test", ["127.0.0.1"])}
+
+    desired, applied = reconcile_persisted_entries(
+        {},
+        hosts_entries,
+        state_available=False,
+    )
+
+    assert set(desired) == {"existing.test"}
+    assert set(applied) == {"existing.test"}
+
+
+def test_reconcile_persisted_entries_uses_hosts_state_as_applied_snapshot() -> None:
+    state_entries = {
+        "example.test": hmg.HostEntry(
+            "example.test",
+            ["127.0.0.1", "10.0.0.1"],
+            selected_ip="10.0.0.1",
+            enabled=True,
+        )
+    }
+    hosts_entries = {
+        "example.test": hmg.HostEntry(
+            "example.test",
+            ["127.0.0.1"],
+            selected_ip="127.0.0.1",
+            enabled=False,
+        )
+    }
+
+    desired, applied = reconcile_persisted_entries(state_entries, hosts_entries)
+
+    assert desired["example.test"].selected_ip == "10.0.0.1"
+    assert desired["example.test"].enabled
+    assert applied["example.test"].ips == ["127.0.0.1", "10.0.0.1"]
+    assert applied["example.test"].selected_ip == "127.0.0.1"
+    assert not applied["example.test"].enabled
+
+
+def test_delete_entries_by_domain_removes_all_selected_entries_and_origins() -> None:
+    entries = {
+        "first.test": hmg.HostEntry("first.test", ["127.0.0.1"]),
+        "second.test": hmg.HostEntry("second.test", ["10.0.0.1"]),
+        "keep.test": hmg.HostEntry("keep.test", ["::1"]),
+    }
+    origins = {
+        ("first.test", "127.0.0.1"): PairOrigin(manual=True),
+        ("second.test", "10.0.0.1"): PairOrigin(source_ids={"source"}),
+        ("keep.test", "::1"): PairOrigin(manual=True),
+    }
+
+    removed = delete_entries_by_domain(
+        entries,
+        origins,
+        ["second.test", "first.test", "second.test", "missing.test"],
+    )
+
+    assert removed == ["second.test", "first.test"]
+    assert set(entries) == {"keep.test"}
+    assert set(origins) == {("keep.test", "::1")}
+
+
+def test_delete_entries_from_internal_state_persists_entries_and_origins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entries = {
+        "delete.test": hmg.HostEntry("delete.test", ["127.0.0.1"]),
+        "keep.test": hmg.HostEntry("keep.test", ["::1"]),
+    }
+    origins: Origins = {
+        ("delete.test", "127.0.0.1"): PairOrigin(source_ids={"source"}),
+        ("keep.test", "::1"): PairOrigin(manual=True),
+    }
+    sources = [UrlSource("Primary", "https://example.test/hosts", id="source")]
+    saved_entries: list[set[str]] = []
+    saved_origins: list[set[tuple[str, str]]] = []
+
+    def fake_save_state(current_entries: dict[str, hmg.HostEntry]) -> None:
+        saved_entries.append(set(current_entries))
+
+    def fake_save_sources_state(_sources: list[UrlSource], current_origins: Origins) -> None:
+        saved_origins.append(set(current_origins))
+
+    monkeypatch.setattr(ui_module, "save_state", fake_save_state)
+    monkeypatch.setattr(ui_module, "save_sources_state", fake_save_sources_state)
+
+    removed = delete_entries_from_internal_state(
+        entries,
+        origins,
+        sources,
+        ["delete.test"],
+    )
+
+    assert removed == ["delete.test"]
+    assert saved_entries == [{"keep.test"}]
+    assert saved_origins == [{("keep.test", "::1")}]
 
 
 def test_copy_data_files_preserves_existing_destination_files(tmp_path: Path) -> None:

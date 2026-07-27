@@ -86,6 +86,7 @@ from hmg.sources import (
     PairOrigin,
     UrlSource,
     apply_source,
+    clone_entries,
     fetch_source,
     load_sources_state,
     mark_domain_manual,
@@ -256,6 +257,56 @@ def entries_snapshot(entries: dict[str, HostEntry]) -> EntriesSnapshot:
         (domain, tuple(entry.ips), entry.selected_ip, entry.enabled)
         for domain, entry in sorted(entries.items())
     )
+
+
+def reconcile_persisted_entries(
+    state_entries: dict[str, HostEntry],
+    hosts_entries: dict[str, HostEntry],
+    *,
+    state_available: bool = True,
+) -> tuple[dict[str, HostEntry], dict[str, HostEntry]]:
+    """Restore desired state while retaining the state currently applied to hosts."""
+    desired_entries = clone_entries(state_entries if state_available else hosts_entries)
+    applied_entries: dict[str, HostEntry] = {}
+    for domain, hosts_entry in hosts_entries.items():
+        state_entry = state_entries.get(domain)
+        if state_entry is None:
+            applied_entries[domain] = clone_entries({domain: hosts_entry})[domain]
+            continue
+        applied_entry = clone_entries({domain: state_entry})[domain]
+        applied_entry.add_ips(hosts_entry.ips)
+        applied_entry.selected_ip = hosts_entry.selected_ip
+        applied_entry.enabled = hosts_entry.enabled
+        applied_entries[domain] = applied_entry
+    return desired_entries, applied_entries
+
+
+def delete_entries_by_domain(
+    entries: dict[str, HostEntry],
+    origins: Origins,
+    domains: list[str],
+) -> list[str]:
+    removed: list[str] = []
+    for domain in dict.fromkeys(domains):
+        if domain not in entries:
+            continue
+        del entries[domain]
+        remove_domain_origins(origins, domain)
+        removed.append(domain)
+    return removed
+
+
+def delete_entries_from_internal_state(
+    entries: dict[str, HostEntry],
+    origins: Origins,
+    sources: list[UrlSource],
+    domains: list[str],
+) -> list[str]:
+    removed = delete_entries_by_domain(entries, origins, domains)
+    if removed:
+        save_state(entries)
+        save_sources_state(sources, origins)
+    return removed
 
 
 def format_pair_origin(origin: PairOrigin | None, sources: list[UrlSource]) -> str:
@@ -732,7 +783,11 @@ class SourcesDialog(QDialog):
         title = QLabel("URL-источники")
         title.setObjectName("sectionTitle")
         layout.addWidget(title)
-        hint = QLabel("Активные источники обрабатываются последовательно сверху вниз")
+        hint = QLabel(
+            "Активные источники обрабатываются последовательно сверху вниз. "
+            "Изменяется только внутреннее состояние — файл hosts сохраняется отдельно."
+        )
+        hint.setWordWrap(True)
         hint.setObjectName("hint")
         layout.addWidget(hint)
 
@@ -777,11 +832,12 @@ class SourcesDialog(QDialog):
         actions.addWidget(close)
         actions.addStretch()
         update = QPushButton("Обновить")
-        update.setToolTip("Добавить новые данные, ничего не удаляя")
+        update.setToolTip("Добавить новые данные во внутреннее состояние, ничего не удаляя")
         update.clicked.connect(lambda: self.choose_action("update"))
         actions.addWidget(update)
         sync = QPushButton("Синхронизировать")
         sync.setObjectName("primary")
+        sync.setToolTip("Синхронизировать внутреннее состояние; файл hosts не изменяется")
         sync.clicked.connect(lambda: self.choose_action("sync"))
         actions.addWidget(sync)
         replace = QPushButton("Заменить целиком")
@@ -876,7 +932,8 @@ class SourcesDialog(QDialog):
             answer = QMessageBox.warning(
                 self,
                 APP_NAME,
-                "Текущий список будет полностью заменён данными активных источников. Продолжить?",
+                "Текущий внутренний список будет полностью заменён данными активных источников.\n"
+                "Файл hosts останется без изменений. Продолжить?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -1012,30 +1069,27 @@ class HostsApp(QMainWindow):
 
     def load_initial_data(self) -> None:
         logger.info("initial_data_load_started")
+        state_available = state_path().exists()
         state_entries = load_state()
         try:
             hosts_entries = parse_hosts_text(read_hosts_file(self.hosts_file))
         except Exception:
             logger.exception("hosts_entries_load_failed", hosts_file=str(self.hosts_file))
             hosts_entries = {}
-        self.entries = {}
-        for domain, entry in hosts_entries.items():
-            state_entry = state_entries.get(domain)
-            if state_entry:
-                state_entry.enabled = entry.enabled
-                state_entry.selected_ip = entry.selected_ip
-                state_entry.add_ips(entry.ips)
-                self.entries[domain] = state_entry
-            else:
-                self.entries[domain] = entry
+        self.entries, applied_entries = reconcile_persisted_entries(
+            state_entries,
+            hosts_entries,
+            state_available=state_available,
+        )
         self.sources, stored_origins = load_sources_state()
         self.origins = normalize_origins(self.entries, stored_origins)
-        self._saved_snapshot = entries_snapshot(self.entries)
+        self._saved_snapshot = entries_snapshot(applied_entries)
         logger.info(
             "initial_data_loaded",
             state_entries_count=len(state_entries),
             hosts_entries_count=len(hosts_entries),
             visible_entries_count=len(self.entries),
+            has_pending_hosts_changes=entries_snapshot(self.entries) != self._saved_snapshot,
         )
 
     def create_widgets(self) -> None:
@@ -1086,6 +1140,7 @@ class HostsApp(QMainWindow):
         toolbar.addWidget(edit_button)
         delete_button = QPushButton("Удалить")
         delete_button.setObjectName("danger")
+        delete_button.setToolTip("Удалить все выбранные строки")
         delete_button.clicked.connect(self.delete_entry)
         toolbar.addWidget(delete_button)
         import_button = QPushButton("Импорт")
@@ -1101,7 +1156,8 @@ class HostsApp(QMainWindow):
         self.table.setHorizontalHeaderLabels(["Включено", "Домен", "Активный IP", "Происхождение", "Всего IP"])
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setToolTip("Для выбора нескольких строк используйте Ctrl/Cmd или Shift")
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(50)
@@ -1188,13 +1244,25 @@ class HostsApp(QMainWindow):
                     break
             logger.info("entry_selected_ip_changed", domain=domain, selected_ip=ip)
 
+    def selected_domains(self) -> list[str]:
+        selected_rows = sorted(self.table.selectionModel().selectedRows(1), key=lambda index: index.row())
+        return [
+            str(index.data(Qt.ItemDataRole.UserRole))
+            for index in selected_rows
+            if index.data(Qt.ItemDataRole.UserRole) is not None
+        ]
+
     def selected_domain(self, warn: bool = True) -> str | None:
-        row = self.table.currentRow()
-        item = self.table.item(row, 1) if row >= 0 else None
-        if item:
-            return str(item.data(Qt.ItemDataRole.UserRole))
+        domains = self.selected_domains()
+        if len(domains) == 1:
+            return domains[0]
         if warn:
-            QMessageBox.warning(self, APP_NAME, "Сначала выберите домен")
+            message = (
+                "Сначала выберите домен"
+                if not domains
+                else "Для этого действия выберите только один домен"
+            )
+            QMessageBox.warning(self, APP_NAME, message)
         return None
 
     def reload(self) -> None:
@@ -1248,14 +1316,32 @@ class HostsApp(QMainWindow):
         self.refresh_table(new.domain)
 
     def delete_entry(self) -> None:
-        domain = self.selected_domain()
-        if not domain:
+        domains = self.selected_domains()
+        if not domains:
+            QMessageBox.warning(self, APP_NAME, "Сначала выберите хотя бы один домен")
             return
-        answer = QMessageBox.question(self, APP_NAME, f"Удалить {domain}?")
+        if len(domains) == 1:
+            question = f"Удалить {domains[0]}?"
+        else:
+            visible_domains = "\n".join(f"• {domain}" for domain in domains[:8])
+            remainder = len(domains) - 8
+            if remainder > 0:
+                visible_domains += f"\n• …и ещё {remainder}"
+            question = f"Удалить выбранные записи ({len(domains)})?\n\n{visible_domains}"
+        answer = QMessageBox.question(self, APP_NAME, question)
         if answer == QMessageBox.StandardButton.Yes:
-            del self.entries[domain]
-            remove_domain_origins(self.origins, domain)
-            logger.info("entry_deleted", domain=domain, entries_count=len(self.entries))
+            removed = delete_entries_from_internal_state(
+                self.entries,
+                self.origins,
+                self.sources,
+                domains,
+            )
+            logger.info(
+                "entries_deleted",
+                domains=removed,
+                removed_count=len(removed),
+                entries_count=len(self.entries),
+            )
             self.refresh_table()
 
     def import_entries(self) -> None:
@@ -1460,16 +1546,6 @@ class HostsApp(QMainWindow):
                     remove_missing=action == "sync",
                 )
 
-        try:
-            original = read_hosts_file(self.hosts_file)
-            candidate_text = build_preserve_hosts_text(original, candidate_entries)
-            preview = HostsDiffPreview(self, original, candidate_text, "Применить")
-            if preview.exec() != QDialog.DialogCode.Accepted:
-                return
-        except Exception as exc:
-            QMessageBox.critical(self, APP_NAME, f"Не удалось построить предпросмотр:\n{exc}")
-            return
-
         self.entries = candidate_entries
         self.origins = candidate_origins
         self.refresh_table()
@@ -1479,7 +1555,9 @@ class HostsApp(QMainWindow):
         QMessageBox.information(
             self,
             APP_NAME,
-            "Данные источников применены. Нажмите «Сохранить в hosts», чтобы записать изменения.",
+            "Внутреннее состояние обновлено. Файл hosts не изменён.\n\n"
+            "Используйте «Предпросмотр», чтобы проверить diff, и "
+            "«Сохранить в hosts», чтобы применить изменения вручную.",
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:
