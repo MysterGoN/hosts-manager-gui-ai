@@ -77,6 +77,7 @@ DIFF_COLORS = {
     "removed": "#573338",
     "changed": "#554A25",
 }
+HOSTS_TABLE_FONT_SIZE = 13
 
 APP_STYLE = """
 QWidget {
@@ -763,19 +764,20 @@ class HostsApp(QMainWindow):
             self.table.setCellWidget(row, 0, check_cell)
 
             domain_item = QTableWidgetItem(domain)
-            domain_item.setFont(monospace_font())
+            domain_item.setFont(monospace_font(HOSTS_TABLE_FONT_SIZE))
             domain_item.setData(Qt.ItemDataRole.UserRole, domain)
             self.table.setItem(row, 1, domain_item)
 
             combo = QComboBox()
-            combo.setFont(monospace_font())
+            combo.setFont(monospace_font(HOSTS_TABLE_FONT_SIZE))
+            combo.setStyleSheet(f"font-size: {HOSTS_TABLE_FONT_SIZE}pt;")
             combo.addItems(entry.ips)
             combo.setCurrentText(entry.selected_ip)
             combo.currentTextChanged.connect(lambda ip, name=domain: self.set_selected_ip(name, ip))
             self.table.setCellWidget(row, 2, combo)
 
             count = QTableWidgetItem(str(len(entry.ips)))
-            count.setFont(monospace_font())
+            count.setFont(monospace_font(HOSTS_TABLE_FONT_SIZE))
             count.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(row, 3, count)
             if domain == selected_domain:
