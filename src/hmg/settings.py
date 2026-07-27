@@ -11,6 +11,8 @@ from platformdirs import PlatformDirs
 
 APP_ID = "HostsManagerGUI"
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
+MIN_LOG_RETENTION_SECONDS = 60
+MAX_LOG_RETENTION_SECONDS = 3650 * 24 * 60 * 60
 
 
 def platform_directories() -> PlatformDirs:
@@ -45,7 +47,7 @@ class AppSettings:
     log_level: str = "INFO"
     log_max_bytes: int = 5 * 1024 * 1024
     log_backup_count: int = 5
-    log_retention_days: int = 30
+    log_retention_seconds: int = 30 * 24 * 60 * 60
     log_to_file_in_dev: bool = False
 
     @property
@@ -67,8 +69,8 @@ class AppSettings:
             raise ValueError("Максимальный размер лога должен быть не меньше 64 КБ")
         if not 1 <= self.log_backup_count <= 100:
             raise ValueError("Количество архивов должно быть от 1 до 100")
-        if not 1 <= self.log_retention_days <= 3650:
-            raise ValueError("Срок хранения логов должен быть от 1 до 3650 дней")
+        if not MIN_LOG_RETENTION_SECONDS <= self.log_retention_seconds <= MAX_LOG_RETENTION_SECONDS:
+            raise ValueError("Срок хранения логов должен быть от 1 min до 3650 d")
         return self
 
 
@@ -86,13 +88,21 @@ def load_settings() -> AppSettings:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         defaults = default_settings()
+        retention_seconds = payload.get("log_retention_seconds")
+        if retention_seconds is None:
+            retention_seconds = int(
+                payload.get(
+                    "log_retention_days",
+                    defaults.log_retention_seconds // (24 * 60 * 60),
+                )
+            ) * (24 * 60 * 60)
         return AppSettings(
             data_dir=str(payload.get("data_dir", defaults.data_dir)),
             log_dir=str(payload.get("log_dir", defaults.log_dir)),
             log_level=str(payload.get("log_level", defaults.log_level)).upper(),
             log_max_bytes=int(payload.get("log_max_bytes", defaults.log_max_bytes)),
             log_backup_count=int(payload.get("log_backup_count", defaults.log_backup_count)),
-            log_retention_days=int(payload.get("log_retention_days", defaults.log_retention_days)),
+            log_retention_seconds=int(retention_seconds),
             log_to_file_in_dev=bool(payload.get("log_to_file_in_dev", defaults.log_to_file_in_dev)),
         ).validate()
     except (OSError, ValueError, TypeError, json.JSONDecodeError):

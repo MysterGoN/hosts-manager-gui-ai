@@ -8,14 +8,18 @@ import hmg.core as hmg
 import hmg.ui as ui_module
 from hmg.sources import Origins, PairOrigin, UrlSource
 from hmg.ui import (
+    RETENTION_UNITS,
+    SIZE_UNITS,
     HostsApp,
     build_side_by_side_diff,
+    combine_measurement,
     delete_entries_by_domain,
     delete_entries_from_internal_state,
     entries_snapshot,
     format_diff_status,
     format_numbered_diff_side,
     reconcile_persisted_entries,
+    split_measurement,
     summarize_diff_rows,
 )
 
@@ -319,6 +323,42 @@ def test_entries_snapshot_tracks_all_editable_host_state() -> None:
     assert entries_snapshot(entries) == (
         ("example.test", ("127.0.0.1", "10.0.0.1"), "10.0.0.1", False),
     )
+
+
+@pytest.mark.parametrize(
+    ("total", "expected"),
+    [
+        (64 * 1024, (64, "KB")),
+        (5 * 1024**2, (5, "MB")),
+        (2 * 1024**3, (2, "GB")),
+    ],
+)
+def test_log_size_measurement_uses_common_units(
+    total: int,
+    expected: tuple[int, str],
+) -> None:
+    value, unit = split_measurement(total, SIZE_UNITS)
+
+    assert (value, unit) == expected
+    assert combine_measurement(value, unit, SIZE_UNITS) == total
+
+
+@pytest.mark.parametrize(
+    ("total", "expected"),
+    [
+        (30 * 60, (30, "min")),
+        (12 * 60 * 60, (12, "h")),
+        (30 * 24 * 60 * 60, (30, "d")),
+    ],
+)
+def test_log_retention_measurement_uses_common_units(
+    total: int,
+    expected: tuple[int, str],
+) -> None:
+    value, unit = split_measurement(total, RETENTION_UNITS)
+
+    assert (value, unit) == expected
+    assert combine_measurement(value, unit, RETENTION_UNITS) == total
 
 
 def test_reconcile_persisted_entries_keeps_state_not_yet_applied_to_hosts() -> None:

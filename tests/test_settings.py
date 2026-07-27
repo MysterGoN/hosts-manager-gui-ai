@@ -20,7 +20,7 @@ def test_settings_round_trip_in_platform_config_file(
         log_level="DEBUG",
         log_max_bytes=2 * 1024 * 1024,
         log_backup_count=7,
-        log_retention_days=14,
+        log_retention_seconds=14 * 24 * 60 * 60,
         log_to_file_in_dev=True,
     )
 
@@ -28,6 +28,22 @@ def test_settings_round_trip_in_platform_config_file(
 
     assert load_settings() == expected
     assert get_settings() == expected
+
+
+def test_legacy_retention_days_are_migrated_to_seconds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"data_dir": "/data", "log_dir": "/logs", "log_retention_days": 14}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings_module, "settings_file_path", lambda: path)
+
+    loaded = load_settings()
+
+    assert loaded.log_retention_seconds == 14 * 24 * 60 * 60
 
 
 def test_invalid_settings_file_falls_back_to_defaults(

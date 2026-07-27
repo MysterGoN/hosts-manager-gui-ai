@@ -73,6 +73,7 @@ from hmg.core import (
 from hmg.logging import configure_logging, get_logger
 from hmg.settings import (
     LOG_LEVELS,
+    MAX_LOG_RETENTION_SECONDS,
     AppSettings,
     default_data_dir,
     default_log_dir,
@@ -102,6 +103,10 @@ logger = get_logger(__name__)
 DiffRow = tuple[str, str, str | None, str | None]
 DiffStats = dict[str, int]
 EntriesSnapshot = tuple[tuple[str, tuple[str, ...], str, bool], ...]
+
+SIZE_UNITS = {"KB": 1024, "MB": 1024**2, "GB": 1024**3}
+RETENTION_UNITS = {"min": 60, "h": 60 * 60, "d": 24 * 60 * 60}
+MAX_LOG_SIZE_BYTES = 1024**4
 
 DIFF_COLORS = {
     "added": "#234D37",
@@ -257,6 +262,18 @@ def entries_snapshot(entries: dict[str, HostEntry]) -> EntriesSnapshot:
         (domain, tuple(entry.ips), entry.selected_ip, entry.enabled)
         for domain, entry in sorted(entries.items())
     )
+
+
+def split_measurement(total: int, units: dict[str, int]) -> tuple[int, str]:
+    for unit, factor in reversed(units.items()):
+        if total >= factor and total % factor == 0:
+            return total // factor, unit
+    unit, factor = next(iter(units.items()))
+    return max(1, (total + factor - 1) // factor), unit
+
+
+def combine_measurement(value: int, unit: str, units: dict[str, int]) -> int:
+    return value * units[unit]
 
 
 def reconcile_persisted_entries(
@@ -948,7 +965,8 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.result_settings: AppSettings | None = None
         self.setWindowTitle("Настройки")
-        self.resize(720, 560)
+        self.setMinimumSize(820, 680)
+        self.resize(860, 720)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
@@ -958,7 +976,10 @@ class SettingsDialog(QDialog):
 
         paths = QGroupBox("Хранение данных")
         paths_form = QFormLayout(paths)
+        paths_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        paths_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
         self.data_dir_edit = QLineEdit(settings.data_dir)
+        self.data_dir_edit.setMinimumWidth(440)
         paths_form.addRow("Каталог данных", self._path_picker(self.data_dir_edit))
         data_hint = QLabel("Здесь хранятся state.json и sources.json")
         data_hint.setObjectName("hint")
@@ -974,26 +995,46 @@ class SettingsDialog(QDialog):
 
         logs = QGroupBox("Логи")
         logs_form = QFormLayout(logs)
+        logs_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        logs_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
         self.log_dir_edit = QLineEdit(settings.log_dir)
+        self.log_dir_edit.setMinimumWidth(440)
         logs_form.addRow("Каталог логов", self._path_picker(self.log_dir_edit))
         self.log_level_combo = QComboBox()
         self.log_level_combo.addItems(LOG_LEVELS)
         self.log_level_combo.setCurrentText(settings.log_level)
         logs_form.addRow("Уровень", self.log_level_combo)
         self.log_size_spin = QSpinBox()
-        self.log_size_spin.setRange(1, 1024)
-        self.log_size_spin.setSuffix(" МБ")
-        self.log_size_spin.setValue(max(1, settings.log_max_bytes // (1024 * 1024)))
-        logs_form.addRow("Размер одного файла", self.log_size_spin)
+        self.log_size_unit_combo = QComboBox()
+        self.log_size_unit_combo.addItems(list(SIZE_UNITS))
+        size_value, size_unit = split_measurement(settings.log_max_bytes, SIZE_UNITS)
+        self.log_size_unit_combo.setCurrentText(size_unit)
+        self.update_log_size_range(size_unit)
+        self.log_size_spin.setValue(size_value)
+        self.log_size_unit_combo.currentTextChanged.connect(self.update_log_size_range)
+        logs_form.addRow(
+            "Размер одного файла",
+            self._measurement_input(self.log_size_spin, self.log_size_unit_combo),
+        )
         self.log_backups_spin = QSpinBox()
         self.log_backups_spin.setRange(1, 100)
         self.log_backups_spin.setValue(settings.log_backup_count)
         logs_form.addRow("Количество архивов", self.log_backups_spin)
-        self.log_days_spin = QSpinBox()
-        self.log_days_spin.setRange(1, 3650)
-        self.log_days_spin.setSuffix(" дней")
-        self.log_days_spin.setValue(settings.log_retention_days)
-        logs_form.addRow("Срок хранения", self.log_days_spin)
+        self.log_retention_spin = QSpinBox()
+        self.log_retention_unit_combo = QComboBox()
+        self.log_retention_unit_combo.addItems(list(RETENTION_UNITS))
+        retention_value, retention_unit = split_measurement(
+            settings.log_retention_seconds,
+            RETENTION_UNITS,
+        )
+        self.log_retention_unit_combo.setCurrentText(retention_unit)
+        self.update_log_retention_range(retention_unit)
+        self.log_retention_spin.setValue(retention_value)
+        self.log_retention_unit_combo.currentTextChanged.connect(self.update_log_retention_range)
+        logs_form.addRow(
+            "Срок хранения",
+            self._measurement_input(self.log_retention_spin, self.log_retention_unit_combo),
+        )
         self.dev_file_check = QCheckBox("Писать в файл также в режиме разработки")
         self.dev_file_check.setChecked(settings.log_to_file_in_dev)
         logs_form.addRow("", self.dev_file_check)
@@ -1021,6 +1062,26 @@ class SettingsDialog(QDialog):
         row.addWidget(browse)
         return widget
 
+    def _measurement_input(self, spin: QSpinBox, unit_combo: QComboBox) -> QWidget:
+        widget = QWidget()
+        row = QHBoxLayout(widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        spin.setMinimumWidth(160)
+        row.addWidget(spin, 1)
+        unit_combo.setMinimumWidth(80)
+        row.addWidget(unit_combo)
+        return widget
+
+    def update_log_size_range(self, unit: str) -> None:
+        factor = SIZE_UNITS[unit]
+        minimum = max(1, (64 * 1024 + factor - 1) // factor)
+        self.log_size_spin.setRange(minimum, MAX_LOG_SIZE_BYTES // factor)
+
+    def update_log_retention_range(self, unit: str) -> None:
+        factor = RETENTION_UNITS[unit]
+        self.log_retention_spin.setRange(1, MAX_LOG_RETENTION_SECONDS // factor)
+
     def choose_directory(self, line_edit: QLineEdit) -> None:
         selected = QFileDialog.getExistingDirectory(self, "Выберите каталог", line_edit.text())
         if selected:
@@ -1035,9 +1096,17 @@ class SettingsDialog(QDialog):
             data_dir=self.data_dir_edit.text().strip(),
             log_dir=self.log_dir_edit.text().strip(),
             log_level=self.log_level_combo.currentText(),
-            log_max_bytes=self.log_size_spin.value() * 1024 * 1024,
+            log_max_bytes=combine_measurement(
+                self.log_size_spin.value(),
+                self.log_size_unit_combo.currentText(),
+                SIZE_UNITS,
+            ),
             log_backup_count=self.log_backups_spin.value(),
-            log_retention_days=self.log_days_spin.value(),
+            log_retention_seconds=combine_measurement(
+                self.log_retention_spin.value(),
+                self.log_retention_unit_combo.currentText(),
+                RETENTION_UNITS,
+            ),
             log_to_file_in_dev=self.dev_file_check.isChecked(),
         )
         try:

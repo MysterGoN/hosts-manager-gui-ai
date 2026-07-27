@@ -14,7 +14,7 @@ def make_settings(tmp_path: Path, **overrides: object) -> AppSettings:
         "log_level": "INFO",
         "log_max_bytes": 1024,
         "log_backup_count": 2,
-        "log_retention_days": 30,
+        "log_retention_seconds": 30 * 24 * 60 * 60,
         "log_to_file_in_dev": False,
     }
     values.update(overrides)
@@ -74,6 +74,6 @@ def test_old_rotated_logs_are_removed_by_retention_period(tmp_path: Path) -> Non
 
     os.utime(old_log, (old_timestamp, old_timestamp))
 
-    cleanup_old_logs(log_dir, 30)
+    cleanup_old_logs(log_dir, 30 * 24 * 60 * 60)
 
     assert not old_log.exists()

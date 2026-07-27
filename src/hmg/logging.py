@@ -61,7 +61,7 @@ def configure_logging(settings: AppSettings, *, packaged: bool | None = None) ->
     if packaged_mode or settings.log_to_file_in_dev:
         settings.log_path.mkdir(parents=True, exist_ok=True)
         log_path = settings.log_path / "hmg.log"
-        cleanup_old_logs(settings.log_path, settings.log_retention_days)
+        cleanup_old_logs(settings.log_path, settings.log_retention_seconds)
         file_handler = RotatingFileHandler(
             log_path,
             maxBytes=settings.log_max_bytes,
@@ -79,10 +79,10 @@ def configure_logging(settings: AppSettings, *, packaged: bool | None = None) ->
     return log_path
 
 
-def cleanup_old_logs(log_dir: Path, retention_days: int, *, now: datetime | None = None) -> None:
+def cleanup_old_logs(log_dir: Path, retention_seconds: int, *, now: datetime | None = None) -> None:
     if not log_dir.exists():
         return
-    cutoff = (now or datetime.now()) - timedelta(days=retention_days)
+    cutoff = (now or datetime.now()) - timedelta(seconds=retention_seconds)
     for path in log_dir.glob("hmg.log.*"):
         try:
             modified = datetime.fromtimestamp(path.stat().st_mtime)
