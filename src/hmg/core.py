@@ -22,7 +22,6 @@ APP_NAME = "Hosts Manager GUI"
 STATE_VERSION = 1
 MANAGED_START = "###### HMG START ######"
 MANAGED_END = "###### HMG END ######"
-INLINE_MARK = "# managed-by=hosts-manager-gui"
 
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?!-)[A-Za-z0-9_*.:-]{1,63}(?<!-)(?:\.(?!-)[A-Za-z0-9_*-]{1,63}(?<!-))*\.?$")
 logger = get_logger(__name__)
@@ -137,10 +136,10 @@ class HostEntry:
         return added, removed
 
     def active_line(self) -> str:
-        return f"{self.selected_ip}\t{self.domain}\t{INLINE_MARK}"
+        return f"{self.selected_ip}\t{self.domain}"
 
     def disabled_line(self) -> str:
-        return f"# {self.selected_ip}\t{self.domain}\t{INLINE_MARK}; disabled"
+        return f"# {self.selected_ip}\t{self.domain}"
 
 
 def parse_hosts_line(line: str, allow_disabled: bool = False) -> list[tuple[str, str, bool]]:

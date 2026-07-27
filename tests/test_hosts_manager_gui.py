@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 import hmg.core as hmg
+from hmg.ui import build_side_by_side_diff, format_diff_status, summarize_diff_rows
 
 
 def test_host_entry_normalizes_domain_deduplicates_ips_and_selects_first_ip() -> None:
@@ -99,8 +100,9 @@ def test_build_preserve_hosts_text_replaces_only_managed_block() -> None:
 
     assert "127.0.0.1 localhost" in rendered
     assert "192.168.1.10 example.test old-alias" in rendered
-    assert "10.0.0.2\texample.test\t# managed-by=hosts-manager-gui" in rendered
-    assert "# 10.0.0.3\tdisabled.test\t# managed-by=hosts-manager-gui; disabled" in rendered
+    assert "10.0.0.2\texample.test" in rendered
+    assert "# 10.0.0.3\tdisabled.test" in rendered
+    assert "# managed-by=hosts-manager-gui" not in rendered
     assert "old-managed.test" not in rendered
 
 
@@ -233,3 +235,20 @@ def test_write_hosts_elevated_uses_platform_runner_and_removes_temp_file(
     assert backup.name.endswith(".bak")
     assert calls == [(hosts_path, calls[0][1], backup)]
     assert not calls[0][1].exists()
+
+
+def test_side_by_side_diff_tags_only_actual_changed_lines() -> None:
+    rows = build_side_by_side_diff("127.0.0.1 localhost\n", "127.0.0.1 localhost\n10.0.0.1 example.test\n")
+
+    assert rows == [
+        ("127.0.0.1 localhost", "127.0.0.1 localhost", None, None),
+        ("", "10.0.0.1 example.test", None, "added"),
+    ]
+
+
+def test_side_by_side_diff_status_counts_changed_lines() -> None:
+    rows = build_side_by_side_diff("a\nb\nold\n", "a\nnew\nold\nextra\n")
+    stats = summarize_diff_rows(rows)
+
+    assert stats == {"added": 1, "removed": 0, "changed": 1}
+    assert format_diff_status(stats) == "Добавлено строк: 1  Удалено строк: 0  Изменено строк: 1"

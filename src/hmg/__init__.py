@@ -1,6 +1,5 @@
 from hmg.core import (
     APP_NAME,
-    INLINE_MARK,
     MANAGED_END,
     MANAGED_START,
     STATE_VERSION,
@@ -33,7 +32,6 @@ from hmg.ui import HostsApp, main
 __all__ = [
     "APP_NAME",
     "ElevatedWriteError",
-    "INLINE_MARK",
     "MANAGED_END",
     "MANAGED_START",
     "STATE_VERSION",

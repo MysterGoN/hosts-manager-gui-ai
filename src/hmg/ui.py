@@ -34,6 +34,20 @@ from hmg.logging import configure_logging, get_logger
 ENABLED_MARK = "🟢"
 logger = get_logger(__name__)
 
+DiffRow = tuple[str, str, str | None, str | None]
+DiffStats = dict[str, int]
+
+LIGHT_DIFF_COLORS = {
+    "added": "#d8f5d1",
+    "removed": "#ffd9d9",
+    "changed": "#fff3bf",
+}
+DARK_DIFF_COLORS = {
+    "added": "#294936",
+    "removed": "#563438",
+    "changed": "#514722",
+}
+
 
 class ChangePreview(tk.Toplevel):
     def __init__(self, parent: tk.Tk, title: str, diff: EntryDiff, confirm_text: str = "Применить") -> None:
@@ -121,6 +135,7 @@ class HostsDiffPreview(tk.Toplevel):
         self.result = False
         self.transient(parent)
         self.grab_set()
+        self.diff_rows = build_side_by_side_diff(before, after)
 
         root = ttk.Frame(self, padding=10)
         root.pack(fill=tk.BOTH, expand=True)
@@ -129,6 +144,9 @@ class HostsDiffPreview(tk.Toplevel):
         header.pack(fill=tk.X)
         ttk.Label(header, text="Сейчас").pack(side=tk.LEFT, expand=True, fill=tk.X)
         ttk.Label(header, text="После сохранения").pack(side=tk.LEFT, expand=True, fill=tk.X)
+
+        self.status_var = tk.StringVar(value=format_diff_status(summarize_diff_rows(self.diff_rows)))
+        ttk.Label(root, textvariable=self.status_var).pack(fill=tk.X, pady=(6, 0))
 
         body = ttk.Frame(root)
         body.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
@@ -143,7 +161,7 @@ class HostsDiffPreview(tk.Toplevel):
 
         self.configure_tags(self.before_text)
         self.configure_tags(self.after_text)
-        self.insert_diff(before, after)
+        self.insert_diff()
 
         buttons = ttk.Frame(root)
         buttons.pack(fill=tk.X, pady=(10, 0))
@@ -156,40 +174,29 @@ class HostsDiffPreview(tk.Toplevel):
 
     @staticmethod
     def configure_tags(widget: tk.Text) -> None:
-        widget.tag_configure("added", background="#d8f5d1")
-        widget.tag_configure("removed", background="#ffd9d9")
-        widget.tag_configure("changed", background="#fff3bf")
+        colors = diff_colors_for_widget(widget)
+        for tag, background in colors.items():
+            widget.tag_configure(tag, background=background)
+        # Diff backgrounds must not cover the native text-selection highlight.
+        widget.tag_raise("sel")
 
-    def insert_diff(self, before: str, after: str) -> None:
-        before_lines = before.splitlines()
-        after_lines = after.splitlines()
-        matcher = difflib.SequenceMatcher(a=before_lines, b=after_lines)
-        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-            left = before_lines[i1:i2]
-            right = after_lines[j1:j2]
-            max_len = max(len(left), len(right))
-            for index in range(max_len):
-                before_line = left[index] if index < len(left) else ""
-                after_line = right[index] if index < len(right) else ""
-                line_tag = None
-                if tag == "delete":
-                    line_tag = "removed"
-                elif tag == "insert":
-                    line_tag = "added"
-                elif tag == "replace":
-                    line_tag = "changed"
-                self.append_line(self.before_text, before_line, line_tag)
-                self.append_line(self.after_text, after_line, line_tag)
+    def insert_diff(self) -> None:
+        self.before_text.delete("1.0", tk.END)
+        self.after_text.delete("1.0", tk.END)
+
+        for line_number, (before_line, after_line, before_tag, after_tag) in enumerate(self.diff_rows, start=1):
+            self.before_text.insert(tk.END, before_line + "\n")
+            self.after_text.insert(tk.END, after_line + "\n")
+            self.apply_line_tag(self.before_text, line_number, before_line, before_tag)
+            self.apply_line_tag(self.after_text, line_number, after_line, after_tag)
 
         self.before_text.configure(state="disabled")
         self.after_text.configure(state="disabled")
 
     @staticmethod
-    def append_line(widget: tk.Text, line: str, tag: str | None) -> None:
-        start = widget.index(tk.END)
-        widget.insert(tk.END, line + "\n")
-        if tag:
-            widget.tag_add(tag, start, widget.index(tk.END))
+    def apply_line_tag(widget: tk.Text, line_number: int, line: str, tag: str | None) -> None:
+        if tag and line:
+            widget.tag_add(tag, f"{line_number}.0", f"{line_number}.end")
 
     def scroll_both(self, *args: str) -> None:
         self.before_text.yview(*args)
@@ -202,6 +209,68 @@ class HostsDiffPreview(tk.Toplevel):
     def cancel(self) -> None:
         self.result = False
         self.destroy()
+
+
+def build_side_by_side_diff(before: str, after: str) -> list[DiffRow]:
+    before_lines = before.splitlines()
+    after_lines = after.splitlines()
+    matcher = difflib.SequenceMatcher(a=before_lines, b=after_lines, autojunk=False)
+    rows: list[DiffRow] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        left = before_lines[i1:i2]
+        right = after_lines[j1:j2]
+        if tag == "equal":
+            rows.extend(align_diff_lines(left, right))
+        elif tag == "delete":
+            rows.extend(align_diff_lines(left, ["" for _line in left], before_tag="removed"))
+        elif tag == "insert":
+            rows.extend(align_diff_lines(["" for _line in right], right, after_tag="added"))
+        elif tag == "replace":
+            rows.extend(align_diff_lines(left, right, before_tag="changed", after_tag="changed"))
+    return rows
+
+
+def diff_colors_for_widget(widget: tk.Text) -> dict[str, str]:
+    """Choose muted diff colors that retain contrast with the current text theme."""
+    try:
+        red, green, blue = widget.winfo_rgb(widget.cget("background"))
+        luminance = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 65535
+    except tk.TclError:
+        luminance = 1.0
+    return DARK_DIFF_COLORS if luminance < 0.5 else LIGHT_DIFF_COLORS
+
+
+def align_diff_lines(
+    before_lines: list[str],
+    after_lines: list[str],
+    before_tag: str | None = None,
+    after_tag: str | None = None,
+) -> list[DiffRow]:
+    rows: list[DiffRow] = []
+    max_len = max(len(before_lines), len(after_lines))
+    for index in range(max_len):
+        before_line = before_lines[index] if index < len(before_lines) else ""
+        after_line = after_lines[index] if index < len(after_lines) else ""
+        rows.append((before_line, after_line, before_tag if before_line else None, after_tag if after_line else None))
+    return rows
+
+
+def summarize_diff_rows(rows: list[DiffRow]) -> DiffStats:
+    stats = {"added": 0, "removed": 0, "changed": 0}
+    for _before_line, _after_line, before_tag, after_tag in rows:
+        if after_tag == "added":
+            stats["added"] += 1
+        elif before_tag == "removed":
+            stats["removed"] += 1
+        elif before_tag == "changed" or after_tag == "changed":
+            stats["changed"] += 1
+    return stats
+
+
+def format_diff_status(stats: DiffStats) -> str:
+    if not any(stats.values()):
+        return "Изменений нет"
+    return f"Добавлено строк: {stats['added']}  Удалено строк: {stats['removed']}  Изменено строк: {stats['changed']}"
 
 
 class EntryDialog(tk.Toplevel):
@@ -409,6 +478,7 @@ class HostsApp(tk.Tk):
         self.hosts_file = hosts_path()
         self.entries: dict[str, HostEntry] = {}
         self.ip_editor: ttk.Combobox | None = None
+        self.ip_editor_domain: str | None = None
 
         self.load_initial_data()
         self.create_widgets()
@@ -536,6 +606,7 @@ class HostsApp(tk.Tk):
         editor.place(x=x, y=y, width=width, height=height)
         editor.focus_set()
         self.ip_editor = editor
+        self.ip_editor_domain = domain
 
         def apply_selection() -> None:
             selected_ip = editor.get()
@@ -547,13 +618,19 @@ class HostsApp(tk.Tk):
         editor.bind("<<ComboboxSelected>>", lambda _event: apply_selection())
         editor.bind("<Return>", lambda _event: apply_selection())
         editor.bind("<Escape>", lambda _event: self.close_ip_editor())
-        editor.bind("<FocusOut>", lambda _event: self.close_ip_editor())
+        editor.bind("<FocusOut>", lambda _event: self.close_ip_editor(apply=True))
         editor.event_generate("<Button-1>")
 
-    def close_ip_editor(self) -> None:
+    def close_ip_editor(self, apply: bool = False) -> None:
         if self.ip_editor is not None:
+            if apply and self.ip_editor_domain is not None:
+                selected_ip = self.ip_editor.get()
+                entry = self.entries.get(self.ip_editor_domain)
+                if entry and selected_ip in entry.ips:
+                    entry.selected_ip = selected_ip
             self.ip_editor.destroy()
             self.ip_editor = None
+            self.ip_editor_domain = None
 
     def selected_domain(self) -> str | None:
         sel = self.tree.selection()
@@ -677,14 +754,19 @@ class HostsApp(tk.Tk):
             )
 
     def build_preview_texts(self) -> tuple[str, str]:
+        self.close_ip_editor(apply=True)
         original = read_hosts_file(self.hosts_file)
         content = build_preserve_hosts_text(original, self.entries)
+        diff_stats = summarize_diff_rows(build_side_by_side_diff(original, content))
         logger.info(
             "hosts_preview_built",
             hosts_file=str(self.hosts_file),
             before_bytes=len(original.encode("utf-8")),
             after_bytes=len(content.encode("utf-8")),
             entries_count=len(self.entries),
+            diff_added=diff_stats["added"],
+            diff_removed=diff_stats["removed"],
+            diff_changed=diff_stats["changed"],
         )
         return original, content
 
