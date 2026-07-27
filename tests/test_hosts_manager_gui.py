@@ -18,7 +18,10 @@ from hmg.ui import (
     entries_snapshot,
     format_diff_status,
     format_numbered_diff_side,
+    hosts_snapshot,
+    move_entries_to_group,
     reconcile_persisted_entries,
+    remove_group,
     split_measurement,
     summarize_diff_rows,
 )
@@ -118,7 +121,7 @@ def test_build_preserve_hosts_text_replaces_only_managed_block() -> None:
     assert "127.0.0.1 localhost" in rendered
     assert "192.168.1.10 example.test old-alias" in rendered
     assert "10.0.0.2\texample.test" in rendered
-    assert "# 10.0.0.3\tdisabled.test" in rendered
+    assert "disabled.test" not in rendered
     assert "# managed-by=hosts-manager-gui" not in rendered
     assert "old-managed.test" not in rendered
 
@@ -143,6 +146,91 @@ def test_build_preserve_hosts_text_updates_generated_at_when_entries_change() ->
 
     assert "# Generated at 2000-01-01T00:00:00" not in rendered
     assert "10.0.0.3\texample.test" in rendered
+
+
+def test_build_preserve_hosts_text_omits_entries_from_disabled_groups() -> None:
+    groups = [
+        hmg.HostGroup(hmg.DEFAULT_GROUP_ID, hmg.DEFAULT_GROUP_NAME),
+        hmg.HostGroup("work", "Work", enabled=False),
+    ]
+    entries = {
+        "default.test": hmg.HostEntry("default.test", ["127.0.0.1"]),
+        "work.test": hmg.HostEntry("work.test", ["10.0.0.1"], group_id="work"),
+    }
+
+    rendered = hmg.build_preserve_hosts_text("", entries, groups)
+
+    assert "default.test" in rendered
+    assert "work.test" not in rendered
+
+
+def test_state_without_groups_is_migrated_to_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "state.json"
+    path.write_text(
+        '{"version": 1, "entries": [{"domain": "example.test", "ips": ["127.0.0.1"]}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(hmg, "state_path", lambda: path)
+
+    entries, groups = hmg.load_state_with_groups()
+
+    assert [(group.id, group.name) for group in groups] == [(hmg.DEFAULT_GROUP_ID, hmg.DEFAULT_GROUP_NAME)]
+    assert entries["example.test"].group_id == hmg.DEFAULT_GROUP_ID
+
+
+def test_state_round_trip_preserves_groups(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "state.json"
+    monkeypatch.setattr(hmg, "state_path", lambda: path)
+    monkeypatch.setattr(hmg, "hosts_path", lambda: tmp_path / "hosts")
+    groups = [
+        hmg.HostGroup(hmg.DEFAULT_GROUP_ID, hmg.DEFAULT_GROUP_NAME, enabled=False),
+        hmg.HostGroup("work", "Work"),
+    ]
+    entries = {
+        "example.test": hmg.HostEntry(
+            "example.test",
+            ["127.0.0.1"],
+            group_id="work",
+        )
+    }
+
+    hmg.save_state(entries, groups)
+    loaded_entries, loaded_groups = hmg.load_state_with_groups()
+
+    assert loaded_entries["example.test"].group_id == "work"
+    assert [(group.id, group.name, group.enabled) for group in loaded_groups] == [
+        (hmg.DEFAULT_GROUP_ID, hmg.DEFAULT_GROUP_NAME, False),
+        ("work", "Work", True),
+    ]
+
+
+def test_normalize_groups_keeps_default_first_and_repairs_missing_group() -> None:
+    entries = {
+        "example.test": hmg.HostEntry(
+            "example.test",
+            ["127.0.0.1"],
+            group_id="missing",
+        )
+    }
+    groups = [
+        hmg.HostGroup("work", "Work"),
+        hmg.HostGroup(hmg.DEFAULT_GROUP_ID, "Renamed Default", enabled=False),
+    ]
+
+    normalized = hmg.normalize_groups(entries, groups)
+
+    assert [(group.id, group.name) for group in normalized] == [
+        (hmg.DEFAULT_GROUP_ID, hmg.DEFAULT_GROUP_NAME),
+        ("work", "Work"),
+    ]
+    assert not normalized[0].enabled
+    assert entries["example.test"].group_id == hmg.DEFAULT_GROUP_ID
 
 
 def test_parse_csv_file_supports_header_and_semicolon_ip_list(tmp_path: Path) -> None:
@@ -194,6 +282,7 @@ def test_merge_entries_keeps_existing_state_and_adds_new_ips() -> None:
             ["127.0.0.1"],
             selected_ip="127.0.0.1",
             enabled=False,
+            group_id="work",
         )
     }
     incoming = {
@@ -205,7 +294,9 @@ def test_merge_entries_keeps_existing_state_and_adds_new_ips() -> None:
 
     assert not merged["example.test"].enabled
     assert merged["example.test"].selected_ip == "127.0.0.1"
+    assert merged["example.test"].group_id == "work"
     assert merged["example.test"].ips == ["127.0.0.1", "10.0.0.1"]
+    assert merged["new.test"].group_id == hmg.DEFAULT_GROUP_ID
     assert diff["added_domains"] == ["new.test"]
     assert diff["added_ips"] == {"example.test": ["10.0.0.1"]}
 
@@ -217,6 +308,7 @@ def test_replace_entries_preserves_existing_enabled_state() -> None:
             ["127.0.0.1"],
             selected_ip="127.0.0.1",
             enabled=False,
+            group_id="work",
         ),
         "removed.test": hmg.HostEntry("removed.test", ["127.0.0.2"]),
     }
@@ -226,6 +318,7 @@ def test_replace_entries_preserves_existing_enabled_state() -> None:
 
     assert set(replaced) == {"example.test"}
     assert not replaced["example.test"].enabled
+    assert replaced["example.test"].group_id == "work"
     assert replaced["example.test"].selected_ip == "10.0.0.1"
     assert diff["removed_domains"] == ["removed.test"]
     assert diff["added_ips"] == {"example.test": ["10.0.0.1"]}
@@ -320,9 +413,66 @@ def test_entries_snapshot_tracks_all_editable_host_state() -> None:
         )
     }
 
-    assert entries_snapshot(entries) == (
-        ("example.test", ("127.0.0.1", "10.0.0.1"), "10.0.0.1", False),
-    )
+    assert entries_snapshot(entries) == (("example.test", ("127.0.0.1", "10.0.0.1"), "10.0.0.1", False),)
+
+
+def test_hosts_snapshot_respects_entry_and_group_switches() -> None:
+    groups = [
+        hmg.HostGroup(hmg.DEFAULT_GROUP_ID, hmg.DEFAULT_GROUP_NAME),
+        hmg.HostGroup("disabled-group", "Disabled", enabled=False),
+    ]
+    entries = {
+        "active.test": hmg.HostEntry("active.test", ["127.0.0.1"]),
+        "disabled.test": hmg.HostEntry("disabled.test", ["10.0.0.1"], enabled=False),
+        "group.test": hmg.HostEntry(
+            "group.test",
+            ["192.168.1.1"],
+            group_id="disabled-group",
+        ),
+    }
+
+    assert hosts_snapshot(entries, groups) == (("active.test", "127.0.0.1"),)
+    assert entries["group.test"].enabled
+
+
+def test_move_multiple_entries_between_groups() -> None:
+    groups = [
+        hmg.HostGroup(hmg.DEFAULT_GROUP_ID, hmg.DEFAULT_GROUP_NAME),
+        hmg.HostGroup("work", "Work"),
+    ]
+    entries = {
+        "first.test": hmg.HostEntry("first.test", ["127.0.0.1"]),
+        "second.test": hmg.HostEntry("second.test", ["10.0.0.1"]),
+    }
+
+    moved = move_entries_to_group(entries, ["first.test", "second.test"], "work", groups)
+    returned = move_entries_to_group(entries, ["first.test"], hmg.DEFAULT_GROUP_ID, groups)
+
+    assert moved == ["first.test", "second.test"]
+    assert returned == ["first.test"]
+    assert entries["first.test"].group_id == hmg.DEFAULT_GROUP_ID
+    assert entries["second.test"].group_id == "work"
+
+
+def test_remove_group_moves_its_entries_to_default() -> None:
+    groups = [
+        hmg.HostGroup(hmg.DEFAULT_GROUP_ID, hmg.DEFAULT_GROUP_NAME),
+        hmg.HostGroup("work", "Work"),
+    ]
+    entries = {
+        "work.test": hmg.HostEntry("work.test", ["127.0.0.1"], group_id="work"),
+    }
+
+    remaining, moved = remove_group(entries, groups, "work")
+
+    assert [group.id for group in remaining] == [hmg.DEFAULT_GROUP_ID]
+    assert moved == ["work.test"]
+    assert entries["work.test"].group_id == hmg.DEFAULT_GROUP_ID
+
+
+def test_default_group_cannot_be_removed() -> None:
+    with pytest.raises(ValueError, match="Default"):
+        remove_group({}, [hmg.HostGroup(hmg.DEFAULT_GROUP_ID, hmg.DEFAULT_GROUP_NAME)], hmg.DEFAULT_GROUP_ID)
 
 
 @pytest.mark.parametrize(

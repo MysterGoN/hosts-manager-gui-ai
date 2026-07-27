@@ -81,8 +81,7 @@ def save_sources_state(sources: list[UrlSource], origins: Origins) -> None:
     payload = {
         "version": 1,
         "sources": [
-            {"id": source.id, "name": source.name, "url": source.url, "enabled": source.enabled}
-            for source in sources
+            {"id": source.id, "name": source.name, "url": source.url, "enabled": source.enabled} for source in sources
         ],
         "origins": [
             {
@@ -123,7 +122,13 @@ def remove_domain_origins(origins: Origins, domain: str) -> None:
 
 def clone_entries(entries: dict[str, HostEntry]) -> dict[str, HostEntry]:
     return {
-        domain: HostEntry(entry.domain, list(entry.ips), entry.selected_ip, entry.enabled)
+        domain: HostEntry(
+            entry.domain,
+            list(entry.ips),
+            entry.selected_ip,
+            entry.enabled,
+            entry.group_id,
+        )
         for domain, entry in entries.items()
     }
 
@@ -140,7 +145,7 @@ def apply_source(
     tracking = normalize_origins(result, origins)
     incoming_pairs = {(domain, ip) for domain, entry in incoming.items() for ip in entry.ips}
     previous_states = {
-        domain: (entry.enabled, entry.selected_ip)
+        domain: (entry.enabled, entry.selected_ip, entry.group_id)
         for domain, entry in result.items()
         if domain in incoming
     }
@@ -159,8 +164,17 @@ def apply_source(
         for ip in incoming_entry.ips:
             entry = result.get(domain)
             if entry is None:
-                enabled, _selected_ip = previous_states.get(domain, (True, ip))
-                entry = HostEntry(domain, [ip], selected_ip=ip, enabled=enabled)
+                enabled, _selected_ip, group_id = previous_states.get(
+                    domain,
+                    (True, ip, incoming_entry.group_id),
+                )
+                entry = HostEntry(
+                    domain,
+                    [ip],
+                    selected_ip=ip,
+                    enabled=enabled,
+                    group_id=group_id,
+                )
                 result[domain] = entry
             elif ip not in entry.ips:
                 entry.add_ips([ip])
@@ -168,10 +182,11 @@ def apply_source(
         if domain_was_missing and incoming_entry.selected_ip in result[domain].ips:
             result[domain].selected_ip = incoming_entry.selected_ip
 
-    for domain, (enabled, selected_ip) in previous_states.items():
+    for domain, (enabled, selected_ip, group_id) in previous_states.items():
         entry = result.get(domain)
         if entry:
             entry.enabled = enabled
+            entry.group_id = group_id
             if selected_ip in entry.ips:
                 entry.selected_ip = selected_ip
     return result, tracking

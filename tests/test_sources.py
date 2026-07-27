@@ -19,10 +19,7 @@ from hmg.ui import format_pair_origin
 
 
 def test_parse_url_source_supports_standard_hosts_format_and_aliases() -> None:
-    entries = parse_url_source_text(
-        "127.0.0.1 example.test alias.test # comment\n"
-        "10.0.0.1 example.test\n"
-    )
+    entries = parse_url_source_text("127.0.0.1 example.test alias.test # comment\n10.0.0.1 example.test\n")
 
     assert entries["example.test"].ips == ["127.0.0.1", "10.0.0.1"]
     assert entries["alias.test"].ips == ["127.0.0.1"]
@@ -30,13 +27,21 @@ def test_parse_url_source_supports_standard_hosts_format_and_aliases() -> None:
 
 def test_sync_preserves_disabled_state_while_domain_still_exists() -> None:
     source = UrlSource("Primary", "https://example.test/hosts", id="primary")
-    entries = {"example.test": HostEntry("example.test", ["127.0.0.1"], enabled=False)}
+    entries = {
+        "example.test": HostEntry(
+            "example.test",
+            ["127.0.0.1"],
+            enabled=False,
+            group_id="work",
+        )
+    }
     origins = {("example.test", "127.0.0.1"): PairOrigin(source_ids={"primary"})}
     incoming = {"example.test": HostEntry("example.test", ["10.0.0.1"])}
 
     result, tracking = apply_source(entries, origins, source, incoming, remove_missing=True)
 
     assert not result["example.test"].enabled
+    assert result["example.test"].group_id == "work"
     assert result["example.test"].ips == ["10.0.0.1"]
     assert tracking[("example.test", "10.0.0.1")].source_ids == {"primary"}
 
@@ -137,9 +142,7 @@ def test_sources_and_pair_origins_round_trip_in_separate_state_file(
     path = tmp_path / "sources.json"
     monkeypatch.setattr(source_module, "sources_state_path", lambda: path)
     sources = [UrlSource("Primary", "https://example.test/hosts", enabled=False, id="primary")]
-    origins = {
-        ("example.test", "127.0.0.1"): PairOrigin(manual=True, source_ids={"primary", "secondary"})
-    }
+    origins = {("example.test", "127.0.0.1"): PairOrigin(manual=True, source_ids={"primary", "secondary"})}
 
     save_sources_state(sources, origins)
     loaded_sources, loaded_origins = load_sources_state()

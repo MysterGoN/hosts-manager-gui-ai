@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import uuid
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -20,7 +21,9 @@ from hmg.logging import get_logger
 from hmg.settings import get_settings
 
 APP_NAME = "Hosts Manager GUI"
-STATE_VERSION = 1
+STATE_VERSION = 2
+DEFAULT_GROUP_ID = "default"
+DEFAULT_GROUP_NAME = "Default"
 MANAGED_START = "###### HMG START ######"
 MANAGED_END = "###### HMG END ######"
 GENERATED_AT_PREFIX = "# Generated at "
@@ -83,11 +86,31 @@ def validate_domain(value: str) -> str:
 
 
 @dataclass
+class HostGroup:
+    id: str
+    name: str
+    enabled: bool = True
+
+    def __post_init__(self) -> None:
+        self.id = self.id.strip()
+        self.name = self.name.strip()
+        if not self.id:
+            raise ValueError("Group ID is empty")
+        if not self.name:
+            raise ValueError("Group name is empty")
+
+
+def default_group() -> HostGroup:
+    return HostGroup(DEFAULT_GROUP_ID, DEFAULT_GROUP_NAME)
+
+
+@dataclass
 class HostEntry:
     domain: str
     ips: list[str] = field(default_factory=list)
     selected_ip: str = ""
     enabled: bool = True
+    group_id: str = DEFAULT_GROUP_ID
 
     def __post_init__(self) -> None:
         self.domain = validate_domain(self.domain)
@@ -103,6 +126,7 @@ class HostEntry:
             self.selected_ip = validate_ip(self.selected_ip)
         if not self.selected_ip or self.selected_ip not in self.ips:
             self.selected_ip = self.ips[0]
+        self.group_id = self.group_id.strip() or DEFAULT_GROUP_ID
 
     def add_ips(self, new_ips: Iterable[str]) -> list[str]:
         added: list[str] = []
@@ -210,11 +234,38 @@ def parse_hosts_text(text: str) -> dict[str, HostEntry]:
     return entries
 
 
-def load_state() -> dict[str, HostEntry]:
+def normalize_groups(
+    entries: dict[str, HostEntry],
+    groups: Iterable[HostGroup],
+) -> list[HostGroup]:
+    normalized = [default_group()]
+    ids = {DEFAULT_GROUP_ID}
+    names = {DEFAULT_GROUP_NAME.casefold()}
+    for group in groups:
+        if group.id == DEFAULT_GROUP_ID:
+            normalized[0].enabled = bool(group.enabled)
+            continue
+        name_key = group.name.casefold()
+        if group.id in ids or name_key in names:
+            continue
+        normalized.append(HostGroup(group.id, group.name, bool(group.enabled)))
+        ids.add(group.id)
+        names.add(name_key)
+    for entry in entries.values():
+        if entry.group_id not in ids:
+            entry.group_id = DEFAULT_GROUP_ID
+    return normalized
+
+
+def new_group(name: str) -> HostGroup:
+    return HostGroup(uuid.uuid4().hex, name)
+
+
+def load_state_with_groups() -> tuple[dict[str, HostEntry], list[HostGroup]]:
     path = state_path()
     if not path.exists():
         logger.info("state_load_missing", path=str(path))
-        return {}
+        return {}, [default_group()]
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         entries: dict[str, HostEntry] = {}
@@ -224,26 +275,54 @@ def load_state() -> dict[str, HostEntry]:
                 ips=list(item.get("ips", [])),
                 selected_ip=item.get("selected_ip", ""),
                 enabled=bool(item.get("enabled", True)),
+                group_id=str(item.get("group_id", DEFAULT_GROUP_ID)),
             )
             entries[entry.domain] = entry
-        logger.info("state_loaded", path=str(path), entries_count=len(entries))
-        return entries
+        groups: list[HostGroup] = []
+        for item in payload.get("groups", []):
+            groups.append(
+                HostGroup(
+                    id=str(item["id"]),
+                    name=str(item["name"]),
+                    enabled=bool(item.get("enabled", True)),
+                )
+            )
+        groups = normalize_groups(entries, groups)
+        logger.info(
+            "state_loaded",
+            path=str(path),
+            entries_count=len(entries),
+            groups_count=len(groups),
+        )
+        return entries, groups
     except Exception as exc:
         logger.warning("state_load_failed", path=str(path), error=str(exc))
-        return {}
+        return {}, [default_group()]
 
 
-def save_state(entries: dict[str, HostEntry]) -> None:
+def load_state() -> dict[str, HostEntry]:
+    entries, _groups = load_state_with_groups()
+    return entries
+
+
+def save_state(entries: dict[str, HostEntry], groups: Iterable[HostGroup] | None = None) -> None:
     path = state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    normalized_groups = normalize_groups(entries, groups or [default_group()])
     payload = {
         "version": STATE_VERSION,
         "hosts_path": str(hosts_path()),
         "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "groups": [asdict(group) for group in normalized_groups],
         "entries": [asdict(e) for e in sorted(entries.values(), key=lambda x: x.domain)],
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    logger.info("state_saved", path=str(path), entries_count=len(entries))
+    logger.info(
+        "state_saved",
+        path=str(path),
+        entries_count=len(entries),
+        groups_count=len(normalized_groups),
+    )
 
 
 def read_hosts_file(path: Path) -> str:
@@ -285,22 +364,31 @@ def extract_managed_block(lines: list[str]) -> list[str] | None:
     return None
 
 
-def build_managed_block(entries: dict[str, HostEntry]) -> str:
+def build_managed_block(
+    entries: dict[str, HostEntry],
+    groups: Iterable[HostGroup] | None = None,
+) -> str:
     lines = [
         MANAGED_START,
         f"# Managed by {APP_NAME}. Edit through the app when possible.",
         f"{GENERATED_AT_PREFIX}{datetime.now().isoformat(timespec='seconds')}",
     ]
+    enabled_groups = None if groups is None else {group.id for group in groups if group.enabled}
     for entry in sorted(entries.values(), key=lambda x: x.domain):
-        lines.append(entry.active_line() if entry.enabled else entry.disabled_line())
+        if entry.enabled and (enabled_groups is None or entry.group_id in enabled_groups):
+            lines.append(entry.active_line())
     lines.append(MANAGED_END)
     return "\n".join(lines) + "\n"
 
 
-def build_preserve_hosts_text(original_text: str, entries: dict[str, HostEntry]) -> str:
+def build_preserve_hosts_text(
+    original_text: str,
+    entries: dict[str, HostEntry],
+    groups: Iterable[HostGroup] | None = None,
+) -> str:
     lines = original_text.splitlines()
     current_block = extract_managed_block(lines)
-    block = build_managed_block(entries).rstrip()
+    block = build_managed_block(entries, groups).rstrip()
     new_block = block.splitlines()
     if current_block and any(line.strip().startswith(GENERATED_AT_PREFIX) for line in current_block):
         current_content = [line for line in current_block if not line.strip().startswith(GENERATED_AT_PREFIX)]
@@ -440,7 +528,9 @@ def merge_entries(
     base: dict[str, HostEntry],
     incoming: dict[str, HostEntry],
 ) -> tuple[dict[str, HostEntry], EntryDiff]:
-    result = {domain: HostEntry(e.domain, list(e.ips), e.selected_ip, e.enabled) for domain, e in base.items()}
+    result = {
+        domain: HostEntry(e.domain, list(e.ips), e.selected_ip, e.enabled, e.group_id) for domain, e in base.items()
+    }
     added_domains: list[str] = []
     added_ips: dict[str, list[str]] = {}
 
@@ -480,6 +570,7 @@ def replace_entries(
                 list(base[domain].ips),
                 base[domain].selected_ip,
                 base[domain].enabled,
+                base[domain].group_id,
             )
             added, _removed = current.set_ips_replace(imported.ips)
             if added:

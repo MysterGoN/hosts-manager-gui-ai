@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -52,13 +53,17 @@ from PySide6.QtWidgets import (
 
 from hmg.core import (
     APP_NAME,
+    DEFAULT_GROUP_ID,
     ElevatedWriteError,
     EntryDiff,
     HostEntry,
+    HostGroup,
     build_preserve_hosts_text,
     hosts_path,
-    load_state,
+    load_state_with_groups,
     merge_entries,
+    new_group,
+    normalize_groups,
     parse_hosts_text,
     parse_import_text,
     read_hosts_file,
@@ -103,6 +108,7 @@ logger = get_logger(__name__)
 DiffRow = tuple[str, str, str | None, str | None]
 DiffStats = dict[str, int]
 EntriesSnapshot = tuple[tuple[str, tuple[str, ...], str, bool], ...]
+HostsSnapshot = tuple[tuple[str, str], ...]
 
 SIZE_UNITS = {"KB": 1024, "MB": 1024**2, "GB": 1024**3}
 RETENTION_UNITS = {"min": 60, "h": 60 * 60, "d": 24 * 60 * 60}
@@ -259,9 +265,55 @@ def monospace_font(point_size: int | None = None) -> QFont:
 
 def entries_snapshot(entries: dict[str, HostEntry]) -> EntriesSnapshot:
     return tuple(
-        (domain, tuple(entry.ips), entry.selected_ip, entry.enabled)
-        for domain, entry in sorted(entries.items())
+        (domain, tuple(entry.ips), entry.selected_ip, entry.enabled) for domain, entry in sorted(entries.items())
     )
+
+
+def hosts_snapshot(
+    entries: dict[str, HostEntry],
+    groups: list[HostGroup] | None = None,
+) -> HostsSnapshot:
+    enabled_groups = None if groups is None else {group.id for group in groups if group.enabled}
+    return tuple(
+        sorted(
+            (entry.domain, entry.selected_ip)
+            for entry in entries.values()
+            if entry.enabled and (enabled_groups is None or entry.group_id in enabled_groups)
+        )
+    )
+
+
+def move_entries_to_group(
+    entries: dict[str, HostEntry],
+    domains: list[str],
+    group_id: str,
+    groups: list[HostGroup],
+) -> list[str]:
+    if group_id not in {group.id for group in groups}:
+        raise ValueError("Unknown group")
+    moved: list[str] = []
+    for domain in dict.fromkeys(domains):
+        entry = entries.get(domain)
+        if entry is None or entry.group_id == group_id:
+            continue
+        entry.group_id = group_id
+        moved.append(domain)
+    return moved
+
+
+def remove_group(
+    entries: dict[str, HostEntry],
+    groups: list[HostGroup],
+    group_id: str,
+) -> tuple[list[HostGroup], list[str]]:
+    if group_id == DEFAULT_GROUP_ID:
+        raise ValueError("Default group cannot be removed")
+    if group_id not in {group.id for group in groups}:
+        return groups, []
+    moved = [entry.domain for entry in entries.values() if entry.group_id == group_id]
+    for domain in moved:
+        entries[domain].group_id = DEFAULT_GROUP_ID
+    return [group for group in groups if group.id != group_id], sorted(moved)
 
 
 def split_measurement(total: int, units: dict[str, int]) -> tuple[int, str]:
@@ -318,10 +370,14 @@ def delete_entries_from_internal_state(
     origins: Origins,
     sources: list[UrlSource],
     domains: list[str],
+    groups: list[HostGroup] | None = None,
 ) -> list[str]:
     removed = delete_entries_by_domain(entries, origins, domains)
     if removed:
-        save_state(entries)
+        if groups is None:
+            save_state(entries)
+        else:
+            save_state(entries, groups)
         save_sources_state(sources, origins)
     return removed
 
@@ -527,16 +583,8 @@ def format_numbered_diff_side(rows: list[DiffRow], side: str) -> list[str]:
     line_number = 0
     for before_line, after_line, before_tag, after_tag in rows:
         is_placeholder = (
-            side == "before"
-            and not before_line
-            and bool(after_line)
-            and after_tag in {"added", "changed"}
-        ) or (
-            side == "after"
-            and not after_line
-            and bool(before_line)
-            and before_tag in {"removed", "changed"}
-        )
+            side == "before" and not before_line and bool(after_line) and after_tag in {"added", "changed"}
+        ) or (side == "after" and not after_line and bool(before_line) and before_tag in {"removed", "changed"})
         if is_placeholder:
             result.append("      ")
             continue
@@ -870,9 +918,7 @@ class SourcesDialog(QDialog):
             self.table.insertRow(row)
             check = QCheckBox()
             check.setChecked(source.enabled)
-            check.stateChanged.connect(
-                lambda state, source_id=source.id: self.set_source_enabled(source_id, state)
-            )
+            check.stateChanged.connect(lambda state, source_id=source.id: self.set_source_enabled(source_id, state))
             cell = QWidget()
             cell.setStyleSheet("background: transparent;")
             cell_layout = QHBoxLayout(cell)
@@ -960,6 +1006,191 @@ class SourcesDialog(QDialog):
         self.accept()
 
 
+class GroupsDialog(QDialog):
+    def __init__(
+        self,
+        parent: QWidget,
+        groups: list[HostGroup],
+        entries: dict[str, HostEntry],
+    ) -> None:
+        super().__init__(parent)
+        self.groups = [HostGroup(group.id, group.name, group.enabled) for group in groups]
+        self.entry_counts = {
+            group.id: sum(entry.group_id == group.id for entry in entries.values()) for group in groups
+        }
+        self.result_groups: list[HostGroup] | None = None
+        self.setWindowTitle("Группы")
+        self.setMinimumSize(620, 480)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        title = QLabel("Группы")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+        hint = QLabel(
+            "Группа влияет только на отображение и итоговую запись в hosts. "
+            "Индивидуальные переключатели доменов при этом не изменяются."
+        )
+        hint.setWordWrap(True)
+        hint.setObjectName("hint")
+        layout.addWidget(hint)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Активна", "Название", "Записей"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.doubleClicked.connect(lambda _index: self.rename_group())
+        layout.addWidget(self.table, 1)
+
+        actions = QHBoxLayout()
+        add_button = QPushButton("Добавить")
+        add_button.clicked.connect(self.add_group)
+        actions.addWidget(add_button)
+        rename_button = QPushButton("Переименовать")
+        rename_button.clicked.connect(self.rename_group)
+        actions.addWidget(rename_button)
+        delete_button = QPushButton("Удалить")
+        delete_button.setObjectName("danger")
+        delete_button.clicked.connect(self.delete_group)
+        actions.addWidget(delete_button)
+        up_button = QPushButton("↑")
+        up_button.setToolTip("Поднять группу выше")
+        up_button.clicked.connect(lambda: self.move_group(-1))
+        actions.addWidget(up_button)
+        down_button = QPushButton("↓")
+        down_button.setToolTip("Опустить группу ниже")
+        down_button.clicked.connect(lambda: self.move_group(1))
+        actions.addWidget(down_button)
+        actions.addStretch()
+        layout.addLayout(actions)
+
+        buttons = dialog_buttons(self, "Сохранить")
+        buttons.accepted.disconnect()
+        buttons.accepted.connect(self.accept_groups)
+        layout.addWidget(buttons)
+        self.refresh_table()
+
+    def refresh_table(self, selected_id: str | None = None) -> None:
+        self.table.setRowCount(0)
+        for row, group in enumerate(self.groups):
+            self.table.insertRow(row)
+            check = QCheckBox()
+            check.setChecked(group.enabled)
+            check.setToolTip("Исключить или включить всю группу в hosts")
+            check.stateChanged.connect(lambda state, group_id=group.id: self.set_group_enabled(group_id, state))
+            cell = QWidget()
+            cell.setStyleSheet("background: transparent;")
+            cell_layout = QHBoxLayout(cell)
+            cell_layout.setContentsMargins(10, 0, 10, 0)
+            cell_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cell_layout.addWidget(check)
+            self.table.setCellWidget(row, 0, cell)
+            name = QTableWidgetItem(group.name)
+            name.setData(Qt.ItemDataRole.UserRole, group.id)
+            self.table.setItem(row, 1, name)
+            count = QTableWidgetItem(str(self.entry_counts.get(group.id, 0)))
+            count.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(row, 2, count)
+            if group.id == selected_id:
+                self.table.selectRow(row)
+
+    def selected_group(self) -> HostGroup | None:
+        item = self.table.item(self.table.currentRow(), 1)
+        if item is None:
+            QMessageBox.warning(self, APP_NAME, "Выберите группу")
+            return None
+        group_id = str(item.data(Qt.ItemDataRole.UserRole))
+        return next((group for group in self.groups if group.id == group_id), None)
+
+    def set_group_enabled(self, group_id: str, state: int) -> None:
+        group = next((group for group in self.groups if group.id == group_id), None)
+        if group:
+            group.enabled = state == Qt.CheckState.Checked.value
+
+    def unique_name(self, name: str, excluded_id: str | None = None) -> bool:
+        key = name.casefold()
+        return all(group.id == excluded_id or group.name.casefold() != key for group in self.groups)
+
+    def prompt_name(self, title: str, current: str = "", excluded_id: str | None = None) -> str | None:
+        name, accepted = QInputDialog.getText(self, title, "Название группы", text=current)
+        if not accepted:
+            return None
+        name = name.strip()
+        if not name:
+            QMessageBox.warning(self, APP_NAME, "Название группы не может быть пустым")
+            return None
+        if not self.unique_name(name, excluded_id):
+            QMessageBox.warning(self, APP_NAME, "Группа с таким названием уже существует")
+            return None
+        return name
+
+    def add_group(self) -> None:
+        name = self.prompt_name("Новая группа")
+        if name is None:
+            return
+        group = new_group(name)
+        self.groups.append(group)
+        self.entry_counts[group.id] = 0
+        self.refresh_table(group.id)
+
+    def rename_group(self) -> None:
+        group = self.selected_group()
+        if group is None:
+            return
+        if group.id == DEFAULT_GROUP_ID:
+            QMessageBox.information(self, APP_NAME, "Группу Default нельзя переименовать")
+            return
+        name = self.prompt_name("Переименовать группу", group.name, group.id)
+        if name is None:
+            return
+        group.name = name
+        self.refresh_table(group.id)
+
+    def delete_group(self) -> None:
+        group = self.selected_group()
+        if group is None:
+            return
+        if group.id == DEFAULT_GROUP_ID:
+            QMessageBox.information(self, APP_NAME, "Группу Default нельзя удалить")
+            return
+        count = self.entry_counts.get(group.id, 0)
+        answer = QMessageBox.question(
+            self,
+            APP_NAME,
+            f"Удалить группу «{group.name}»?\nЗаписи ({count}) будут перенесены в Default.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.groups = [item for item in self.groups if item.id != group.id]
+        self.entry_counts[DEFAULT_GROUP_ID] = self.entry_counts.get(DEFAULT_GROUP_ID, 0) + count
+        self.entry_counts.pop(group.id, None)
+        self.refresh_table(DEFAULT_GROUP_ID)
+
+    def move_group(self, offset: int) -> None:
+        group = self.selected_group()
+        if group is None:
+            return
+        if group.id == DEFAULT_GROUP_ID:
+            QMessageBox.information(self, APP_NAME, "Группу Default нельзя перемещать")
+            return
+        index = next(index for index, item in enumerate(self.groups) if item.id == group.id)
+        new_index = index + offset
+        if new_index <= 0 or new_index >= len(self.groups):
+            return
+        self.groups[index], self.groups[new_index] = self.groups[new_index], self.groups[index]
+        self.refresh_table(group.id)
+
+    def accept_groups(self) -> None:
+        self.result_groups = self.groups
+        self.accept()
+
+
 class SettingsDialog(QDialog):
     def __init__(self, parent: QWidget, settings: AppSettings) -> None:
         super().__init__(parent)
@@ -1039,9 +1270,7 @@ class SettingsDialog(QDialog):
         self.dev_file_check.setChecked(settings.log_to_file_in_dev)
         logs_form.addRow("", self.dev_file_check)
         mode_hint = QLabel(
-            "Текущий режим: packaged — только файл"
-            if is_packaged()
-            else "Текущий режим: development — stdout"
+            "Текущий режим: packaged — только файл" if is_packaged() else "Текущий режим: development — stdout"
         )
         mode_hint.setObjectName("hint")
         logs_form.addRow("", mode_hint)
@@ -1126,9 +1355,10 @@ class HostsApp(QMainWindow):
         self.setMinimumSize(880, 560)
         self.hosts_file = hosts_path()
         self.entries: dict[str, HostEntry] = {}
+        self.groups: list[HostGroup] = []
         self.sources: list[UrlSource] = []
         self.origins: Origins = {}
-        self._saved_snapshot: EntriesSnapshot = ()
+        self._saved_snapshot: HostsSnapshot = ()
         self._refreshing = False
 
         self.load_initial_data()
@@ -1139,7 +1369,7 @@ class HostsApp(QMainWindow):
     def load_initial_data(self) -> None:
         logger.info("initial_data_load_started")
         state_available = state_path().exists()
-        state_entries = load_state()
+        state_entries, self.groups = load_state_with_groups()
         try:
             hosts_entries = parse_hosts_text(read_hosts_file(self.hosts_file))
         except Exception:
@@ -1152,13 +1382,14 @@ class HostsApp(QMainWindow):
         )
         self.sources, stored_origins = load_sources_state()
         self.origins = normalize_origins(self.entries, stored_origins)
-        self._saved_snapshot = entries_snapshot(applied_entries)
+        self._saved_snapshot = hosts_snapshot(applied_entries)
         logger.info(
             "initial_data_loaded",
             state_entries_count=len(state_entries),
             hosts_entries_count=len(hosts_entries),
             visible_entries_count=len(self.entries),
-            has_pending_hosts_changes=entries_snapshot(self.entries) != self._saved_snapshot,
+            groups_count=len(self.groups),
+            has_pending_hosts_changes=hosts_snapshot(self.entries, self.groups) != self._saved_snapshot,
         )
 
     def create_widgets(self) -> None:
@@ -1215,9 +1446,17 @@ class HostsApp(QMainWindow):
         import_button = QPushButton("Импорт")
         import_button.clicked.connect(self.import_entries)
         toolbar.addWidget(import_button)
-        sources_button = QPushButton("URL-источники")
+        sources_button = QPushButton("Источники")
+        sources_button.setToolTip("Управление URL-источниками")
         sources_button.clicked.connect(self.manage_sources)
         toolbar.addWidget(sources_button)
+        groups_button = QPushButton("Группы")
+        groups_button.clicked.connect(self.manage_groups)
+        toolbar.addWidget(groups_button)
+        move_button = QPushButton("В группу")
+        move_button.setToolTip("Переместить все выбранные записи")
+        move_button.clicked.connect(self.move_selected_entries)
+        toolbar.addWidget(move_button)
         toolbar.addStretch()
         root.addLayout(toolbar)
 
@@ -1257,43 +1496,81 @@ class HostsApp(QMainWindow):
         self._refreshing = True
         blocker = QSignalBlocker(self.table)
         self.table.setRowCount(0)
-        for row, (domain, entry) in enumerate(sorted(self.entries.items())):
-            self.table.insertRow(row)
+        for group in self.groups:
+            group_entries = sorted(
+                ((domain, entry) for domain, entry in self.entries.items() if entry.group_id == group.id),
+                key=lambda item: item[0],
+            )
+            header_row = self.table.rowCount()
+            self.table.insertRow(header_row)
+            self.table.setSpan(header_row, 0, 1, 5)
+            group_cell = QWidget()
+            group_cell.setObjectName("groupHeader")
+            group_cell.setStyleSheet(
+                "QWidget#groupHeader { background: #20232B; "
+                "border-top: 1px solid #343845; border-bottom: 1px solid #343845; }"
+            )
+            group_layout = QHBoxLayout(group_cell)
+            group_layout.setContentsMargins(14, 4, 14, 4)
+            group_check = QCheckBox()
+            group_check.setChecked(group.enabled)
+            group_check.setToolTip("Включить или исключить группу из hosts, не меняя отдельные записи")
+            group_check.stateChanged.connect(lambda state, group_id=group.id: self.set_group_enabled(group_id, state))
+            group_layout.addWidget(group_check)
+            group_label = QLabel(group.name)
+            group_label.setStyleSheet("font-weight: 700; color: #F1F1F5; background: transparent;")
+            group_layout.addWidget(group_label)
+            count_label = QLabel(f"{len(group_entries)} записей")
+            count_label.setObjectName("hint")
+            group_layout.addWidget(count_label)
+            group_layout.addStretch()
+            self.table.setCellWidget(header_row, 0, group_cell)
+            self.table.setRowHeight(header_row, 40)
 
-            check = QCheckBox()
-            check.setChecked(entry.enabled)
-            check.setToolTip("Включить или отключить запись")
-            check.stateChanged.connect(lambda state, name=domain: self.set_enabled(name, state))
-            check_cell = QWidget()
-            check_cell.setStyleSheet("background: transparent;")
-            check_layout = QHBoxLayout(check_cell)
-            check_layout.setContentsMargins(12, 0, 12, 0)
-            check_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            check_layout.addWidget(check)
-            self.table.setCellWidget(row, 0, check_cell)
+            for domain, entry in group_entries:
+                row = self.table.rowCount()
+                self.table.insertRow(row)
 
-            domain_item = QTableWidgetItem(domain)
-            domain_item.setFont(monospace_font(HOSTS_TABLE_FONT_SIZE))
-            domain_item.setData(Qt.ItemDataRole.UserRole, domain)
-            self.table.setItem(row, 1, domain_item)
+                check = QCheckBox()
+                check.setChecked(entry.enabled)
+                check.setToolTip("Включить или отключить запись")
+                check.stateChanged.connect(lambda state, name=domain: self.set_enabled(name, state))
+                check_cell = QWidget()
+                check_cell.setStyleSheet("background: transparent;")
+                check_layout = QHBoxLayout(check_cell)
+                check_layout.setContentsMargins(12, 0, 12, 0)
+                check_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                check_layout.addWidget(check)
+                self.table.setCellWidget(row, 0, check_cell)
 
-            combo = QComboBox()
-            combo.setFont(monospace_font(HOSTS_TABLE_FONT_SIZE))
-            combo.setStyleSheet(f"font-size: {HOSTS_TABLE_FONT_SIZE}pt;")
-            combo.addItems(entry.ips)
-            combo.setCurrentText(entry.selected_ip)
-            combo.currentTextChanged.connect(lambda ip, name=domain: self.set_selected_ip(name, ip))
-            self.table.setCellWidget(row, 2, combo)
+                domain_item = QTableWidgetItem(domain)
+                domain_item.setFont(monospace_font(HOSTS_TABLE_FONT_SIZE))
+                domain_item.setData(Qt.ItemDataRole.UserRole, domain)
+                self.table.setItem(row, 1, domain_item)
 
-            origin = QTableWidgetItem(format_pair_origin(self.origins.get((domain, entry.selected_ip)), self.sources))
-            self.table.setItem(row, 3, origin)
+                combo = QComboBox()
+                combo.setFont(monospace_font(HOSTS_TABLE_FONT_SIZE))
+                combo.setStyleSheet(f"font-size: {HOSTS_TABLE_FONT_SIZE}pt;")
+                combo.addItems(entry.ips)
+                combo.setCurrentText(entry.selected_ip)
+                combo.currentTextChanged.connect(lambda ip, name=domain: self.set_selected_ip(name, ip))
+                self.table.setCellWidget(row, 2, combo)
 
-            count = QTableWidgetItem(str(len(entry.ips)))
-            count.setFont(monospace_font(HOSTS_TABLE_FONT_SIZE))
-            count.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(row, 4, count)
-            if domain == selected_domain:
-                self.table.selectRow(row)
+                origin = QTableWidgetItem(
+                    format_pair_origin(self.origins.get((domain, entry.selected_ip)), self.sources)
+                )
+                self.table.setItem(row, 3, origin)
+
+                count = QTableWidgetItem(str(len(entry.ips)))
+                count.setFont(monospace_font(HOSTS_TABLE_FONT_SIZE))
+                count.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(row, 4, count)
+                if not group.enabled:
+                    muted = QColor("#777B87")
+                    for item in (domain_item, origin, count):
+                        item.setForeground(muted)
+                if domain == selected_domain:
+                    self.table.selectRow(row)
         del blocker
         self._refreshing = False
 
@@ -1301,6 +1578,17 @@ class HostsApp(QMainWindow):
         if not self._refreshing and domain in self.entries:
             self.entries[domain].enabled = state == Qt.CheckState.Checked.value
             logger.info("entry_toggled", domain=domain, enabled=self.entries[domain].enabled)
+
+    def set_group_enabled(self, group_id: str, state: int) -> None:
+        if self._refreshing:
+            return
+        group = next((group for group in self.groups if group.id == group_id), None)
+        if group is None:
+            return
+        group.enabled = state == Qt.CheckState.Checked.value
+        save_state(self.entries, self.groups)
+        logger.info("group_toggled", group_id=group_id, enabled=group.enabled)
+        self.refresh_table()
 
     def set_selected_ip(self, domain: str, ip: str) -> None:
         if not self._refreshing and domain in self.entries and ip in self.entries[domain].ips:
@@ -1326,13 +1614,47 @@ class HostsApp(QMainWindow):
         if len(domains) == 1:
             return domains[0]
         if warn:
-            message = (
-                "Сначала выберите домен"
-                if not domains
-                else "Для этого действия выберите только один домен"
-            )
+            message = "Сначала выберите домен" if not domains else "Для этого действия выберите только один домен"
             QMessageBox.warning(self, APP_NAME, message)
         return None
+
+    def manage_groups(self) -> None:
+        dialog = GroupsDialog(self, self.groups, self.entries)
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.result_groups is None:
+            return
+        self.groups = normalize_groups(self.entries, dialog.result_groups)
+        save_state(self.entries, self.groups)
+        self.refresh_table()
+        logger.info("groups_updated", groups_count=len(self.groups))
+
+    def move_selected_entries(self) -> None:
+        domains = self.selected_domains()
+        if not domains:
+            QMessageBox.warning(self, APP_NAME, "Сначала выберите хотя бы один домен")
+            return
+        labels = [group.name for group in self.groups]
+        current_group_id = self.entries[domains[0]].group_id
+        current_index = next(
+            (index for index, group in enumerate(self.groups) if group.id == current_group_id),
+            0,
+        )
+        label, accepted = QInputDialog.getItem(
+            self,
+            "Переместить в группу",
+            f"Новая группа для записей ({len(domains)})",
+            labels,
+            current_index,
+            False,
+        )
+        if not accepted:
+            return
+        group = next(group for group in self.groups if group.name == label)
+        moved = move_entries_to_group(self.entries, domains, group.id, self.groups)
+        if not moved:
+            return
+        save_state(self.entries, self.groups)
+        self.refresh_table(moved[0] if len(moved) == 1 else None)
+        logger.info("entries_moved_to_group", group_id=group.id, moved_count=len(moved))
 
     def reload(self) -> None:
         answer = QMessageBox.question(
@@ -1377,6 +1699,7 @@ class HostsApp(QMainWindow):
             return
         if old.selected_ip in new.ips:
             new.selected_ip = old.selected_ip
+        new.group_id = old.group_id
         del self.entries[domain]
         remove_domain_origins(self.origins, domain)
         self.entries[new.domain] = new
@@ -1404,6 +1727,7 @@ class HostsApp(QMainWindow):
                 self.origins,
                 self.sources,
                 domains,
+                self.groups,
             )
             logger.info(
                 "entries_deleted",
@@ -1434,15 +1758,13 @@ class HostsApp(QMainWindow):
             self.entries = new_entries
             if mode == "replace":
                 self.origins = {
-                    (domain, ip): PairOrigin(manual=True)
-                    for domain, entry in self.entries.items()
-                    for ip in entry.ips
+                    (domain, ip): PairOrigin(manual=True) for domain, entry in self.entries.items() for ip in entry.ips
                 }
             else:
                 for domain in incoming:
                     mark_domain_manual(self.origins, self.entries[domain])
             self.refresh_table()
-            save_state(self.entries)
+            save_state(self.entries, self.groups)
             save_sources_state(self.sources, self.origins)
             QMessageBox.information(
                 self,
@@ -1452,7 +1774,7 @@ class HostsApp(QMainWindow):
 
     def build_preview_texts(self) -> tuple[str, str]:
         original = read_hosts_file(self.hosts_file)
-        content = build_preserve_hosts_text(original, self.entries)
+        content = build_preserve_hosts_text(original, self.entries, self.groups)
         stats = summarize_diff_rows(build_side_by_side_diff(original, content))
         logger.info(
             "hosts_preview_built",
@@ -1487,9 +1809,9 @@ class HostsApp(QMainWindow):
             backup = write_hosts(self.hosts_file, content)
         except PermissionError:
             backup = self.write_content_elevated(content)
-        save_state(self.entries)
+        save_state(self.entries, self.groups)
         save_sources_state(self.sources, self.origins)
-        self._saved_snapshot = entries_snapshot(self.entries)
+        self._saved_snapshot = hosts_snapshot(self.entries, self.groups)
         logger.info("hosts_saved", hosts_file=str(self.hosts_file), backup=str(backup))
         QMessageBox.information(self, APP_NAME, f"Hosts сохранён.\nРезервная копия:\n{backup}")
 
@@ -1573,7 +1895,7 @@ class HostsApp(QMainWindow):
             )
         if removed_ids:
             self.refresh_table()
-            save_state(self.entries)
+            save_state(self.entries, self.groups)
         save_sources_state(self.sources, self.origins)
 
         if result != QDialog.DialogCode.Accepted or dialog.action is None:
@@ -1618,7 +1940,7 @@ class HostsApp(QMainWindow):
         self.entries = candidate_entries
         self.origins = candidate_origins
         self.refresh_table()
-        save_state(self.entries)
+        save_state(self.entries, self.groups)
         save_sources_state(self.sources, self.origins)
         logger.info("url_sources_applied", action=action, sources_count=len(fetched), entries_count=len(self.entries))
         QMessageBox.information(
@@ -1630,7 +1952,7 @@ class HostsApp(QMainWindow):
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        if entries_snapshot(self.entries) == self._saved_snapshot:
+        if hosts_snapshot(self.entries, self.groups) == self._saved_snapshot:
             event.accept()
             return
 
