@@ -1,4 +1,5 @@
 import platform
+import re
 from pathlib import Path
 
 import pytest
@@ -104,6 +105,28 @@ def test_build_preserve_hosts_text_replaces_only_managed_block() -> None:
     assert "# 10.0.0.3\tdisabled.test" in rendered
     assert "# managed-by=hosts-manager-gui" not in rendered
     assert "old-managed.test" not in rendered
+
+
+def test_build_preserve_hosts_text_keeps_generated_at_when_entries_are_unchanged() -> None:
+    entries = {"example.test": hmg.HostEntry("example.test", ["10.0.0.2"])}
+    original = hmg.build_preserve_hosts_text("", entries)
+    original = re.sub(r"# Generated at .+", "# Generated at 2000-01-01T00:00:00", original)
+
+    rendered = hmg.build_preserve_hosts_text(original, entries)
+
+    assert rendered == original
+
+
+def test_build_preserve_hosts_text_updates_generated_at_when_entries_change() -> None:
+    original_entries = {"example.test": hmg.HostEntry("example.test", ["10.0.0.2"])}
+    original = hmg.build_preserve_hosts_text("", original_entries)
+    original = re.sub(r"# Generated at .+", "# Generated at 2000-01-01T00:00:00", original)
+    changed_entries = {"example.test": hmg.HostEntry("example.test", ["10.0.0.3"])}
+
+    rendered = hmg.build_preserve_hosts_text(original, changed_entries)
+
+    assert "# Generated at 2000-01-01T00:00:00" not in rendered
+    assert "10.0.0.3\texample.test" in rendered
 
 
 def test_parse_csv_file_supports_header_and_semicolon_ip_list(tmp_path: Path) -> None:

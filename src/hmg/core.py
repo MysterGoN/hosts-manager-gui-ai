@@ -22,6 +22,7 @@ APP_NAME = "Hosts Manager GUI"
 STATE_VERSION = 1
 MANAGED_START = "###### HMG START ######"
 MANAGED_END = "###### HMG END ######"
+GENERATED_AT_PREFIX = "# Generated at "
 
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?!-)[A-Za-z0-9_*.:-]{1,63}(?<!-)(?:\.(?!-)[A-Za-z0-9_*-]{1,63}(?<!-))*\.?$")
 logger = get_logger(__name__)
@@ -273,11 +274,26 @@ def remove_managed_block(lines: list[str]) -> list[str]:
     return out
 
 
+def extract_managed_block(lines: list[str]) -> list[str] | None:
+    block: list[str] = []
+    in_block = False
+    for line in lines:
+        if line.strip() == MANAGED_START:
+            block = [line]
+            in_block = True
+            continue
+        if in_block:
+            block.append(line)
+            if line.strip() == MANAGED_END:
+                return block
+    return None
+
+
 def build_managed_block(entries: dict[str, HostEntry]) -> str:
     lines = [
         MANAGED_START,
         f"# Managed by {APP_NAME}. Edit through the app when possible.",
-        f"# Generated at {datetime.now().isoformat(timespec='seconds')}",
+        f"{GENERATED_AT_PREFIX}{datetime.now().isoformat(timespec='seconds')}",
     ]
     for entry in sorted(entries.values(), key=lambda x: x.domain):
         lines.append(entry.active_line() if entry.enabled else entry.disabled_line())
@@ -287,9 +303,17 @@ def build_managed_block(entries: dict[str, HostEntry]) -> str:
 
 def build_preserve_hosts_text(original_text: str, entries: dict[str, HostEntry]) -> str:
     lines = original_text.splitlines()
+    current_block = extract_managed_block(lines)
+    block = build_managed_block(entries).rstrip()
+    new_block = block.splitlines()
+    if current_block and any(line.strip().startswith(GENERATED_AT_PREFIX) for line in current_block):
+        current_content = [line for line in current_block if not line.strip().startswith(GENERATED_AT_PREFIX)]
+        new_content = [line for line in new_block if not line.strip().startswith(GENERATED_AT_PREFIX)]
+        if current_content == new_content:
+            return original_text
+
     lines = remove_managed_block(lines)
     base = "\n".join(lines).rstrip()
-    block = build_managed_block(entries).rstrip()
     if base:
         return base + "\n\n" + block + "\n"
     return block + "\n"
