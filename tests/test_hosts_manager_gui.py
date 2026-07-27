@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 import hmg.core as hmg
-from hmg.ui import build_side_by_side_diff, format_diff_status, summarize_diff_rows
+from hmg.ui import build_side_by_side_diff, format_diff_status, format_numbered_diff_side, summarize_diff_rows
 
 
 def test_host_entry_normalizes_domain_deduplicates_ips_and_selects_first_ip() -> None:
@@ -252,3 +252,20 @@ def test_side_by_side_diff_status_counts_changed_lines() -> None:
 
     assert stats == {"added": 1, "removed": 0, "changed": 1}
     assert format_diff_status(stats) == "Добавлено строк: 1  Удалено строк: 0  Изменено строк: 1"
+
+
+def test_diff_line_numbers_follow_each_file_and_skip_placeholders() -> None:
+    rows = build_side_by_side_diff("first\nremoved\nlast\n", "first\nadded\nlast\nextra\n")
+
+    assert format_numbered_diff_side(rows, "before") == [
+        "   1  first",
+        "   2  removed",
+        "   3  last",
+        "      ",
+    ]
+    assert format_numbered_diff_side(rows, "after") == [
+        "   1  first",
+        "   2  added",
+        "   3  last",
+        "   4  extra",
+    ]
