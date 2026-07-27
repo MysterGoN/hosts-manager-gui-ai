@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QProgressDialog,
     QPushButton,
     QRadioButton,
     QTableWidget,
@@ -67,6 +68,20 @@ from hmg.core import (
     write_hosts_elevated,
 )
 from hmg.logging import configure_logging, get_logger
+from hmg.sources import (
+    Origins,
+    PairOrigin,
+    UrlSource,
+    apply_source,
+    fetch_source,
+    load_sources_state,
+    mark_domain_manual,
+    normalize_origins,
+    remove_domain_origins,
+    replace_from_sources,
+    save_sources_state,
+    validate_source_url,
+)
 
 logger = get_logger(__name__)
 
@@ -227,6 +242,16 @@ def entries_snapshot(entries: dict[str, HostEntry]) -> EntriesSnapshot:
         (domain, tuple(entry.ips), entry.selected_ip, entry.enabled)
         for domain, entry in sorted(entries.items())
     )
+
+
+def format_pair_origin(origin: PairOrigin | None, sources: list[UrlSource]) -> str:
+    if origin is None:
+        return "Вручную"
+    labels = ["Вручную"] if origin.manual else []
+    known_ids = {source.id for source in sources}
+    labels.extend(source.name for source in sources if source.id in origin.source_ids)
+    labels.extend(sorted(origin.source_ids - known_ids))
+    return " · ".join(labels) or "Вручную"
 
 
 class DiffTextEdit(QPlainTextEdit):
@@ -630,6 +655,221 @@ class SelectIpDialog(QDialog):
         self.accept()
 
 
+class SourceEditDialog(QDialog):
+    def __init__(self, parent: QWidget, source: UrlSource | None = None) -> None:
+        super().__init__(parent)
+        self.result_source: UrlSource | None = None
+        self.source = source
+        self.setWindowTitle("Изменить источник" if source else "Добавить источник")
+        self.setMinimumWidth(580)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        title = QLabel(self.windowTitle())
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+        form = QFormLayout()
+        self.name_edit = QLineEdit(source.name if source else "")
+        self.name_edit.setPlaceholderText("Рабочие домены")
+        form.addRow("Название", self.name_edit)
+        self.url_edit = QLineEdit(source.url if source else "")
+        self.url_edit.setPlaceholderText("https://example.com/hosts")
+        form.addRow("URL", self.url_edit)
+        self.enabled_check = QCheckBox("Использовать при синхронизации")
+        self.enabled_check.setChecked(source.enabled if source else True)
+        form.addRow("", self.enabled_check)
+        layout.addLayout(form)
+        buttons = dialog_buttons(self, "Сохранить")
+        buttons.accepted.disconnect()
+        buttons.accepted.connect(self.validate_and_accept)
+        layout.addWidget(buttons)
+
+    def validate_and_accept(self) -> None:
+        name = self.name_edit.text().strip()
+        if not name:
+            QMessageBox.warning(self, APP_NAME, "Укажите название источника")
+            return
+        try:
+            url = validate_source_url(self.url_edit.text())
+        except ValueError as exc:
+            QMessageBox.warning(self, APP_NAME, str(exc))
+            return
+        self.result_source = UrlSource(
+            id=self.source.id if self.source else UrlSource(name, url).id,
+            name=name,
+            url=url,
+            enabled=self.enabled_check.isChecked(),
+        )
+        self.accept()
+
+
+class SourcesDialog(QDialog):
+    def __init__(self, parent: QWidget, sources: list[UrlSource]) -> None:
+        super().__init__(parent)
+        self.sources = [UrlSource(source.name, source.url, source.enabled, source.id) for source in sources]
+        self.action: str | None = None
+        self.setWindowTitle("URL-источники")
+        self.resize(900, 540)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        title = QLabel("URL-источники")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+        hint = QLabel("Активные источники обрабатываются последовательно сверху вниз")
+        hint.setObjectName("hint")
+        layout.addWidget(hint)
+
+        self.table = QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["Активен", "Название", "URL"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table.doubleClicked.connect(lambda _index: self.edit_source())
+        layout.addWidget(self.table, 1)
+
+        edit_row = QHBoxLayout()
+        add_button = QPushButton("Добавить")
+        add_button.clicked.connect(self.add_source)
+        edit_row.addWidget(add_button)
+        edit_button = QPushButton("Изменить")
+        edit_button.clicked.connect(self.edit_source)
+        edit_row.addWidget(edit_button)
+        delete_button = QPushButton("Удалить")
+        delete_button.setObjectName("danger")
+        delete_button.clicked.connect(self.delete_source)
+        edit_row.addWidget(delete_button)
+        up_button = QPushButton("↑")
+        up_button.setToolTip("Поднять источник выше")
+        up_button.clicked.connect(lambda: self.move_source(-1))
+        edit_row.addWidget(up_button)
+        down_button = QPushButton("↓")
+        down_button.setToolTip("Опустить источник ниже")
+        down_button.clicked.connect(lambda: self.move_source(1))
+        edit_row.addWidget(down_button)
+        edit_row.addStretch()
+        layout.addLayout(edit_row)
+
+        actions = QHBoxLayout()
+        close = QPushButton("Закрыть")
+        close.clicked.connect(self.reject)
+        actions.addWidget(close)
+        actions.addStretch()
+        update = QPushButton("Обновить")
+        update.setToolTip("Добавить новые данные, ничего не удаляя")
+        update.clicked.connect(lambda: self.choose_action("update"))
+        actions.addWidget(update)
+        sync = QPushButton("Синхронизировать")
+        sync.setObjectName("primary")
+        sync.clicked.connect(lambda: self.choose_action("sync"))
+        actions.addWidget(sync)
+        replace = QPushButton("Заменить целиком")
+        replace.setObjectName("danger")
+        replace.clicked.connect(lambda: self.choose_action("replace"))
+        actions.addWidget(replace)
+        layout.addLayout(actions)
+        self.refresh_table()
+
+    def refresh_table(self) -> None:
+        self.table.setRowCount(0)
+        for row, source in enumerate(self.sources):
+            self.table.insertRow(row)
+            check = QCheckBox()
+            check.setChecked(source.enabled)
+            check.stateChanged.connect(
+                lambda state, source_id=source.id: self.set_source_enabled(source_id, state)
+            )
+            cell = QWidget()
+            cell.setStyleSheet("background: transparent;")
+            cell_layout = QHBoxLayout(cell)
+            cell_layout.setContentsMargins(10, 0, 10, 0)
+            cell_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cell_layout.addWidget(check)
+            self.table.setCellWidget(row, 0, cell)
+            name = QTableWidgetItem(source.name)
+            name.setData(Qt.ItemDataRole.UserRole, source.id)
+            self.table.setItem(row, 1, name)
+            self.table.setItem(row, 2, QTableWidgetItem(source.url))
+
+    def set_source_enabled(self, source_id: str, state: int) -> None:
+        for source in self.sources:
+            if source.id == source_id:
+                source.enabled = state == Qt.CheckState.Checked.value
+                return
+
+    def selected_source(self) -> UrlSource | None:
+        item = self.table.item(self.table.currentRow(), 1)
+        if item is None:
+            QMessageBox.warning(self, APP_NAME, "Выберите источник")
+            return None
+        source_id = str(item.data(Qt.ItemDataRole.UserRole))
+        return next((source for source in self.sources if source.id == source_id), None)
+
+    def add_source(self) -> None:
+        dialog = SourceEditDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.result_source:
+            self.sources.append(dialog.result_source)
+            self.refresh_table()
+
+    def edit_source(self) -> None:
+        source = self.selected_source()
+        if source is None:
+            return
+        dialog = SourceEditDialog(self, source)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.result_source:
+            index = next(index for index, item in enumerate(self.sources) if item.id == source.id)
+            self.sources[index] = dialog.result_source
+            self.refresh_table()
+            self.table.selectRow(index)
+
+    def delete_source(self) -> None:
+        source = self.selected_source()
+        if source is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            APP_NAME,
+            f"Удалить источник «{source.name}»?\nЕго уникальные связи будут удалены.",
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.sources = [item for item in self.sources if item.id != source.id]
+            self.refresh_table()
+
+    def move_source(self, offset: int) -> None:
+        source = self.selected_source()
+        if source is None:
+            return
+        index = next(index for index, item in enumerate(self.sources) if item.id == source.id)
+        new_index = index + offset
+        if not 0 <= new_index < len(self.sources):
+            return
+        self.sources[index], self.sources[new_index] = self.sources[new_index], self.sources[index]
+        self.refresh_table()
+        self.table.selectRow(new_index)
+
+    def choose_action(self, action: str) -> None:
+        if not any(source.enabled for source in self.sources):
+            QMessageBox.warning(self, APP_NAME, "Включите хотя бы один источник")
+            return
+        if action == "replace":
+            answer = QMessageBox.warning(
+                self,
+                APP_NAME,
+                "Текущий список будет полностью заменён данными активных источников. Продолжить?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.action = action
+        self.accept()
+
+
 class HostsApp(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -638,6 +878,8 @@ class HostsApp(QMainWindow):
         self.setMinimumSize(880, 560)
         self.hosts_file = hosts_path()
         self.entries: dict[str, HostEntry] = {}
+        self.sources: list[UrlSource] = []
+        self.origins: Origins = {}
         self._saved_snapshot: EntriesSnapshot = ()
         self._refreshing = False
 
@@ -664,6 +906,8 @@ class HostsApp(QMainWindow):
                 self.entries[domain] = state_entry
             else:
                 self.entries[domain] = entry
+        self.sources, stored_origins = load_sources_state()
+        self.origins = normalize_origins(self.entries, stored_origins)
         self._saved_snapshot = entries_snapshot(self.entries)
         logger.info(
             "initial_data_loaded",
@@ -722,11 +966,14 @@ class HostsApp(QMainWindow):
         import_button = QPushButton("Импорт")
         import_button.clicked.connect(self.import_entries)
         toolbar.addWidget(import_button)
+        sources_button = QPushButton("URL-источники")
+        sources_button.clicked.connect(self.manage_sources)
+        toolbar.addWidget(sources_button)
         toolbar.addStretch()
         root.addLayout(toolbar)
 
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["Включено", "Домен", "Активный IP", "Всего IP"])
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["Включено", "Домен", "Активный IP", "Происхождение", "Всего IP"])
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -737,7 +984,8 @@ class HostsApp(QMainWindow):
         header_view.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header_view.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header_view.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        header_view.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header_view.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        header_view.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         self.table.doubleClicked.connect(lambda _index: self.edit_entry())
         root.addWidget(self.table, 1)
 
@@ -787,10 +1035,13 @@ class HostsApp(QMainWindow):
             combo.currentTextChanged.connect(lambda ip, name=domain: self.set_selected_ip(name, ip))
             self.table.setCellWidget(row, 2, combo)
 
+            origin = QTableWidgetItem(format_pair_origin(self.origins.get((domain, entry.selected_ip)), self.sources))
+            self.table.setItem(row, 3, origin)
+
             count = QTableWidgetItem(str(len(entry.ips)))
             count.setFont(monospace_font(HOSTS_TABLE_FONT_SIZE))
             count.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(row, 3, count)
+            self.table.setItem(row, 4, count)
             if domain == selected_domain:
                 self.table.selectRow(row)
         del blocker
@@ -804,6 +1055,12 @@ class HostsApp(QMainWindow):
     def set_selected_ip(self, domain: str, ip: str) -> None:
         if not self._refreshing and domain in self.entries and ip in self.entries[domain].ips:
             self.entries[domain].selected_ip = ip
+            for row in range(self.table.rowCount()):
+                item = self.table.item(row, 1)
+                if item and item.data(Qt.ItemDataRole.UserRole) == domain:
+                    origin = format_pair_origin(self.origins.get((domain, ip)), self.sources)
+                    self.table.setItem(row, 3, QTableWidgetItem(origin))
+                    break
             logger.info("entry_selected_ip_changed", domain=domain, selected_ip=ip)
 
     def selected_domain(self, warn: bool = True) -> str | None:
@@ -840,6 +1097,7 @@ class HostsApp(QMainWindow):
             )
         else:
             self.entries[entry.domain] = entry
+        mark_domain_manual(self.origins, self.entries[entry.domain])
         logger.info("entry_added", domain=entry.domain, ips_count=len(entry.ips), entries_count=len(self.entries))
         self.refresh_table(entry.domain)
 
@@ -858,7 +1116,9 @@ class HostsApp(QMainWindow):
         if old.selected_ip in new.ips:
             new.selected_ip = old.selected_ip
         del self.entries[domain]
+        remove_domain_origins(self.origins, domain)
         self.entries[new.domain] = new
+        mark_domain_manual(self.origins, new)
         logger.info("entry_edited", old_domain=domain, new_domain=new.domain, ips_count=len(new.ips))
         self.refresh_table(new.domain)
 
@@ -869,6 +1129,7 @@ class HostsApp(QMainWindow):
         answer = QMessageBox.question(self, APP_NAME, f"Удалить {domain}?")
         if answer == QMessageBox.StandardButton.Yes:
             del self.entries[domain]
+            remove_domain_origins(self.origins, domain)
             logger.info("entry_deleted", domain=domain, entries_count=len(self.entries))
             self.refresh_table()
 
@@ -891,8 +1152,18 @@ class HostsApp(QMainWindow):
         preview = ChangePreview(self, title, diff, "Применить импорт")
         if preview.exec() == QDialog.DialogCode.Accepted:
             self.entries = new_entries
+            if mode == "replace":
+                self.origins = {
+                    (domain, ip): PairOrigin(manual=True)
+                    for domain, entry in self.entries.items()
+                    for ip in entry.ips
+                }
+            else:
+                for domain in incoming:
+                    mark_domain_manual(self.origins, self.entries[domain])
             self.refresh_table()
             save_state(self.entries)
+            save_sources_state(self.sources, self.origins)
             QMessageBox.information(
                 self,
                 APP_NAME,
@@ -937,6 +1208,7 @@ class HostsApp(QMainWindow):
         except PermissionError:
             backup = self.write_content_elevated(content)
         save_state(self.entries)
+        save_sources_state(self.sources, self.origins)
         self._saved_snapshot = entries_snapshot(self.entries)
         logger.info("hosts_saved", hosts_file=str(self.hosts_file), backup=str(backup))
         QMessageBox.information(self, APP_NAME, f"Hosts сохранён.\nРезервная копия:\n{backup}")
@@ -960,6 +1232,87 @@ class HostsApp(QMainWindow):
         folder.mkdir(parents=True, exist_ok=True)
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
             QMessageBox.information(self, APP_NAME, f"Папка состояния:\n{folder}")
+
+    def manage_sources(self) -> None:
+        previous_sources = {source.id: source for source in self.sources}
+        dialog = SourcesDialog(self, self.sources)
+        result = dialog.exec()
+        self.sources = dialog.sources
+
+        removed_ids = set(previous_sources) - {source.id for source in self.sources}
+        for source_id in removed_ids:
+            self.entries, self.origins = apply_source(
+                self.entries,
+                self.origins,
+                previous_sources[source_id],
+                {},
+                remove_missing=True,
+            )
+        if removed_ids:
+            self.refresh_table()
+            save_state(self.entries)
+        save_sources_state(self.sources, self.origins)
+
+        if result != QDialog.DialogCode.Accepted or dialog.action is None:
+            return
+        self.apply_sources_action(dialog.action)
+
+    def apply_sources_action(self, action: str) -> None:
+        active_sources = [source for source in self.sources if source.enabled]
+        progress = QProgressDialog("Загрузка источников…", "", 0, len(active_sources), self)
+        progress.setWindowTitle("URL-источники")
+        progress.setCancelButton(None)
+        progress.setMinimumDuration(0)
+        fetched: list[tuple[UrlSource, dict[str, HostEntry]]] = []
+        try:
+            for index, source in enumerate(active_sources):
+                progress.setLabelText(f"Загрузка «{source.name}»\n{source.url}")
+                progress.setValue(index)
+                QApplication.processEvents()
+                fetched.append((source, fetch_source(source)))
+            progress.setValue(len(active_sources))
+        except Exception as exc:
+            logger.warning("url_source_fetch_failed", error=str(exc))
+            QMessageBox.critical(self, APP_NAME, f"Не удалось загрузить источники:\n{exc}")
+            return
+        finally:
+            progress.close()
+
+        if action == "replace":
+            candidate_entries, candidate_origins = replace_from_sources(fetched)
+        else:
+            candidate_entries = self.entries
+            candidate_origins = self.origins
+            for source, incoming in fetched:
+                candidate_entries, candidate_origins = apply_source(
+                    candidate_entries,
+                    candidate_origins,
+                    source,
+                    incoming,
+                    remove_missing=action == "sync",
+                )
+
+        try:
+            original = read_hosts_file(self.hosts_file)
+            candidate_text = build_preserve_hosts_text(original, candidate_entries)
+            preview = HostsDiffPreview(self, original, candidate_text, "Применить")
+            if preview.exec() != QDialog.DialogCode.Accepted:
+                return
+        except Exception as exc:
+            QMessageBox.critical(self, APP_NAME, f"Не удалось построить предпросмотр:\n{exc}")
+            return
+
+        self.entries = candidate_entries
+        self.origins = candidate_origins
+        self.refresh_table()
+        save_state(self.entries)
+        save_sources_state(self.sources, self.origins)
+        logger.info("url_sources_applied", action=action, sources_count=len(fetched), entries_count=len(self.entries))
+        QMessageBox.information(
+            self,
+            APP_NAME,
+            "Данные источников применены. Нажмите «Сохранить в hosts», чтобы записать изменения.",
+        )
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if entries_snapshot(self.entries) == self._saved_snapshot:
