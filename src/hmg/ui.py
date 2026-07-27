@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import difflib
 import re
+import signal
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QSignalBlocker, Qt, QUrl
+from PySide6.QtCore import QSignalBlocker, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QCloseEvent,
     QColor,
@@ -1345,7 +1346,25 @@ def main() -> int:
     application.setStyle("Fusion")
     application.setStyleSheet(APP_STYLE)
     window = HostsApp()
+    sigint_timer = install_sigint_handler(application, window)
     window.show()
     result = application.exec()
+    sigint_timer.stop()
     logger.info("app_stopped")
     return result
+
+
+def install_sigint_handler(application: QApplication, window: HostsApp) -> QTimer:
+    """Let Ctrl+C follow the regular window-close flow, including dirty checks."""
+
+    def close_from_terminal(_signal_number: int, _frame: object) -> None:
+        modal = application.activeModalWidget()
+        if isinstance(modal, QDialog):
+            modal.reject()
+        QTimer.singleShot(0, window.close)
+
+    signal.signal(signal.SIGINT, close_from_terminal)
+    timer = QTimer(application)
+    timer.timeout.connect(lambda: None)
+    timer.start(200)
+    return timer
