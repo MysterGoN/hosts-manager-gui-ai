@@ -5,7 +5,13 @@ from pathlib import Path
 import pytest
 
 import hmg.core as hmg
-from hmg.ui import build_side_by_side_diff, format_diff_status, format_numbered_diff_side, summarize_diff_rows
+from hmg.ui import (
+    build_side_by_side_diff,
+    entries_snapshot,
+    format_diff_status,
+    format_numbered_diff_side,
+    summarize_diff_rows,
+)
 
 
 def test_host_entry_normalizes_domain_deduplicates_ips_and_selects_first_ip() -> None:
@@ -292,3 +298,18 @@ def test_diff_line_numbers_follow_each_file_and_skip_placeholders() -> None:
         "   3  last",
         "   4  extra",
     ]
+
+
+def test_entries_snapshot_tracks_all_editable_host_state() -> None:
+    entries = {
+        "example.test": hmg.HostEntry(
+            "example.test",
+            ["127.0.0.1", "10.0.0.1"],
+            selected_ip="10.0.0.1",
+            enabled=False,
+        )
+    }
+
+    assert entries_snapshot(entries) == (
+        ("example.test", ("127.0.0.1", "10.0.0.1"), "10.0.0.1", False),
+    )

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QSignalBlocker, Qt, QUrl
 from PySide6.QtGui import (
+    QCloseEvent,
     QColor,
     QDesktopServices,
     QFont,
@@ -71,6 +72,7 @@ logger = get_logger(__name__)
 
 DiffRow = tuple[str, str, str | None, str | None]
 DiffStats = dict[str, int]
+EntriesSnapshot = tuple[tuple[str, tuple[str, ...], str, bool], ...]
 
 DIFF_COLORS = {
     "added": "#234D37",
@@ -218,6 +220,13 @@ def monospace_font(point_size: int | None = None) -> QFont:
     if point_size is not None:
         font.setPointSize(point_size)
     return font
+
+
+def entries_snapshot(entries: dict[str, HostEntry]) -> EntriesSnapshot:
+    return tuple(
+        (domain, tuple(entry.ips), entry.selected_ip, entry.enabled)
+        for domain, entry in sorted(entries.items())
+    )
 
 
 class DiffTextEdit(QPlainTextEdit):
@@ -629,6 +638,7 @@ class HostsApp(QMainWindow):
         self.setMinimumSize(880, 560)
         self.hosts_file = hosts_path()
         self.entries: dict[str, HostEntry] = {}
+        self._saved_snapshot: EntriesSnapshot = ()
         self._refreshing = False
 
         self.load_initial_data()
@@ -654,6 +664,7 @@ class HostsApp(QMainWindow):
                 self.entries[domain] = state_entry
             else:
                 self.entries[domain] = entry
+        self._saved_snapshot = entries_snapshot(self.entries)
         logger.info(
             "initial_data_loaded",
             state_entries_count=len(state_entries),
@@ -926,6 +937,7 @@ class HostsApp(QMainWindow):
         except PermissionError:
             backup = self.write_content_elevated(content)
         save_state(self.entries)
+        self._saved_snapshot = entries_snapshot(self.entries)
         logger.info("hosts_saved", hosts_file=str(self.hosts_file), backup=str(backup))
         QMessageBox.information(self, APP_NAME, f"Hosts сохранён.\nРезервная копия:\n{backup}")
 
@@ -948,6 +960,24 @@ class HostsApp(QMainWindow):
         folder.mkdir(parents=True, exist_ok=True)
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
             QMessageBox.information(self, APP_NAME, f"Папка состояния:\n{folder}")
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if entries_snapshot(self.entries) == self._saved_snapshot:
+            event.accept()
+            return
+
+        answer = QMessageBox.warning(
+            self,
+            "Есть несохранённые изменения",
+            "Изменения ещё не сохранены в hosts.\n\nЗакрыть программу без сохранения?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            logger.info("app_closed_with_unsaved_changes")
+            event.accept()
+        else:
+            event.ignore()
 
 
 def main() -> int:
