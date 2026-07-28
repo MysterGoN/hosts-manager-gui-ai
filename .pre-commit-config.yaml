@@ -23,3 +23,9 @@ repos:
         language: system
         pass_filenames: false
         types_or: [python, pyi]
+      - id: uv-audit
+        name: uv audit
+        entry: uv --preview-features audit-command audit --frozen
+        language: system
+        pass_filenames: false
+        always_run: true
