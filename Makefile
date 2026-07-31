@@ -4,7 +4,7 @@ DOCKER_PLATFORM ?= linux/amd64
 DOCKER_ARCH ?= amd64
 DOCKER_PYTHON_IMAGE ?= python:3.14-bookworm
 
-.PHONY: help setup run test lint format typecheck audit check check-ui-scaling pre-commit install-hooks build build-app build-linux-docker build-linux-arm64-docker build-linux-docker-all clean
+.PHONY: help setup run test lint format typecheck audit check check-ui-scaling pre-commit install-hooks commit release-preview release build build-app build-linux-docker build-linux-arm64-docker build-linux-docker-all clean
 
 help:
 	@printf "Доступные цели:\n"
@@ -19,6 +19,9 @@ help:
 	@printf "  check-ui-scaling Проверить Qt-окна при scaling 100-200%%\n"
 	@printf "  pre-commit     Запустить все pre-commit хуки для всех файлов\n"
 	@printf "  install-hooks  Установить git hooks pre-commit\n"
+	@printf "  commit         Создать Conventional Commit через Commitizen\n"
+	@printf "  release-preview Показать следующую версию без изменений\n"
+	@printf "  release        Проверить проект, обновить версию и создать тег\n"
 	@printf "  build          Собрать sdist и wheel\n"
 	@printf "  build-app      Собрать исполняемое приложение для текущей ОС\n"
 	@printf "  build-linux-docker      Собрать Linux-бинарник выбранной архитектуры\n"
@@ -57,7 +60,16 @@ pre-commit:
 	$(UV) run pre-commit run --all-files
 
 install-hooks:
-	$(UV) run pre-commit install
+	$(UV) run pre-commit install --hook-type pre-commit --hook-type commit-msg
+
+commit:
+	$(UV) run cz commit
+
+release-preview:
+	$(UV) run cz bump --dry-run --yes
+
+release: check
+	$(UV) run cz bump --yes --retry
 
 build:
 	$(UV) build

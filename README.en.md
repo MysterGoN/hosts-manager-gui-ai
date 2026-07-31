@@ -152,6 +152,44 @@ make install-hooks
 make pre-commit
 ```
 
+The installed `commit-msg` hook also validates commit-message formatting.
+
+## Versioning and releases
+
+The project is in active development and uses zero-major `0.x.y` versions.
+Until the API is explicitly declared stable, automated releases never increment
+the major version to `1.0.0`: every new `0.x.0` minor release may contain
+backward-incompatible changes.
+
+Commitizen derives the version and tag from Conventional Commits:
+
+- `fix`, `perf`, and `refactor` increment patch: `0.1.0 → 0.1.1`;
+- `feat` increments minor: `0.1.x → 0.2.0`;
+- `!` after the type/scope or a `BREAKING CHANGE:` footer marks an incompatible
+  change and, in zero-major mode, also increments minor instead of major;
+- other types (`docs`, `test`, `build`, `ci`, `chore`) do not trigger a version
+  increment by themselves.
+
+Create a valid commit interactively and preview the next release without changing
+files with:
+
+```bash
+make commit
+make release-preview
+```
+
+Run a release only from a clean working tree:
+
+```bash
+make release
+git push --follow-tags
+```
+
+`make release` runs the checks, updates the version in `pyproject.toml` and
+`uv.lock` together, updates `CHANGELOG.md`, creates a release commit, and creates
+an annotated `vX.Y.Z` tag. It does not push anything to the remote repository;
+explicitly pushing the tag triggers the GitHub Actions build matrix.
+
 ## Building the application
 
 PyInstaller creates a single executable for the current operating system:
