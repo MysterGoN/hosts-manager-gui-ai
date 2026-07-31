@@ -7,7 +7,7 @@ import signal
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QSignalBlocker, Qt, QTimer, QUrl
+from PySide6.QtCore import QModelIndex, QPoint, QSignalBlocker, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QCloseEvent,
     QColor,
@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressDialog,
@@ -47,6 +48,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -113,6 +115,7 @@ HostsSnapshot = tuple[tuple[str, str], ...]
 SIZE_UNITS = {"KB": 1024, "MB": 1024**2, "GB": 1024**3}
 RETENTION_UNITS = {"min": 60, "h": 60 * 60, "d": 24 * 60 * 60}
 MAX_LOG_SIZE_BYTES = 1024**4
+SOURCE_FILTER_MANUAL = "__manual__"
 
 DIFF_COLORS = {
     "added": "#234D37",
@@ -169,6 +172,11 @@ QPushButton {
 }
 QPushButton:hover { background: #2C303B; border-color: #464B5A; }
 QPushButton:pressed { background: #20232B; }
+QPushButton:disabled {
+    background: #1C1E25;
+    border-color: #292C35;
+    color: #666A75;
+}
 QPushButton#primary {
     background: #7C5CFC;
     border-color: #7C5CFC;
@@ -176,6 +184,17 @@ QPushButton#primary {
 }
 QPushButton#primary:hover { background: #8B6DFF; }
 QPushButton#danger { color: #FF8A94; }
+QPushButton#danger:disabled { color: #666A75; }
+QToolButton {
+    min-width: 24px;
+    min-height: 24px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #C9CBD3;
+    font-weight: 700;
+}
+QToolButton:hover { background: #303440; }
 QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QListWidget {
     background: #16181E;
     border: 1px solid #323640;
@@ -289,6 +308,46 @@ def has_unapplied_hosts_changes(
     applied_snapshot: HostsSnapshot,
 ) -> bool:
     return hosts_snapshot(entries, groups) != applied_snapshot
+
+
+def count_unapplied_hosts_changes(
+    entries: dict[str, HostEntry],
+    groups: list[HostGroup],
+    applied_snapshot: HostsSnapshot,
+) -> int:
+    current = dict(hosts_snapshot(entries, groups))
+    applied = dict(applied_snapshot)
+    return sum(current.get(domain) != applied.get(domain) for domain in current.keys() | applied.keys())
+
+
+def entry_matches_filters(
+    entry: HostEntry,
+    origins: Origins,
+    *,
+    query: str = "",
+    state_filter: str = "",
+    group_id: str = "",
+    source_id: str = "",
+) -> bool:
+    normalized_query = query.strip().casefold()
+    if (
+        normalized_query
+        and normalized_query not in entry.domain.casefold()
+        and not any(normalized_query in ip.casefold() for ip in entry.ips)
+    ):
+        return False
+    if state_filter == "enabled" and not entry.enabled:
+        return False
+    if state_filter == "disabled" and entry.enabled:
+        return False
+    if group_id and entry.group_id != group_id:
+        return False
+    if source_id:
+        entry_origins = [origins.get((entry.domain, ip)) for ip in entry.ips]
+        if source_id == SOURCE_FILTER_MANUAL:
+            return any(origin is None or origin.manual for origin in entry_origins)
+        return any(origin is not None and source_id in origin.source_ids for origin in entry_origins)
+    return True
 
 
 def save_internal_state(
@@ -1373,13 +1432,14 @@ class HostsApp(QMainWindow):
         super().__init__()
         self.setWindowTitle(APP_NAME)
         self.resize(1100, 720)
-        self.setMinimumSize(880, 560)
+        self.setMinimumSize(880, 640)
         self.hosts_file = hosts_path()
         self.entries: dict[str, HostEntry] = {}
         self.groups: list[HostGroup] = []
         self.sources: list[UrlSource] = []
         self.origins: Origins = {}
         self._applied_hosts_snapshot: HostsSnapshot = ()
+        self._collapsed_group_ids: set[str] = set()
         self._refreshing = False
 
         self.load_initial_data()
@@ -1461,14 +1521,6 @@ class HostsApp(QMainWindow):
         add_button.setObjectName("primary")
         add_button.clicked.connect(self.add_entry)
         toolbar.addWidget(add_button)
-        edit_button = QPushButton("Изменить")
-        edit_button.clicked.connect(self.edit_entry)
-        toolbar.addWidget(edit_button)
-        delete_button = QPushButton("Удалить")
-        delete_button.setObjectName("danger")
-        delete_button.setToolTip("Удалить все выбранные строки")
-        delete_button.clicked.connect(self.delete_entry)
-        toolbar.addWidget(delete_button)
         import_button = QPushButton("Импорт")
         import_button.clicked.connect(self.import_entries)
         toolbar.addWidget(import_button)
@@ -1479,12 +1531,57 @@ class HostsApp(QMainWindow):
         groups_button = QPushButton("Группы")
         groups_button.clicked.connect(self.manage_groups)
         toolbar.addWidget(groups_button)
-        move_button = QPushButton("В группу")
-        move_button.setToolTip("Переместить все выбранные записи")
-        move_button.clicked.connect(self.move_selected_entries)
-        toolbar.addWidget(move_button)
         toolbar.addStretch()
         root.addLayout(toolbar)
+
+        filters = QHBoxLayout()
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Поиск по домену или IP")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.textChanged.connect(lambda _text: self.refresh_table())
+        filters.addWidget(self.search_edit, 1)
+        self.state_filter = QComboBox()
+        self.state_filter.addItem("Все записи", "")
+        self.state_filter.addItem("Включённые", "enabled")
+        self.state_filter.addItem("Отключённые", "disabled")
+        self.state_filter.currentIndexChanged.connect(lambda _index: self.refresh_table())
+        filters.addWidget(self.state_filter)
+        self.group_filter = QComboBox()
+        self.group_filter.currentIndexChanged.connect(lambda _index: self.refresh_table())
+        filters.addWidget(self.group_filter)
+        self.source_filter = QComboBox()
+        self.source_filter.currentIndexChanged.connect(lambda _index: self.refresh_table())
+        filters.addWidget(self.source_filter)
+        root.addLayout(filters)
+        self.refresh_filter_options()
+
+        context_bar = QFrame()
+        context_bar.setObjectName("card")
+        context_layout = QHBoxLayout(context_bar)
+        context_layout.setContentsMargins(12, 8, 12, 8)
+        self.selection_label = QLabel("Выбрано: 0")
+        self.selection_label.setObjectName("subtitle")
+        context_layout.addWidget(self.selection_label)
+        context_layout.addStretch()
+        self.edit_button = QPushButton("Изменить")
+        self.edit_button.clicked.connect(self.edit_entry)
+        context_layout.addWidget(self.edit_button)
+        self.move_button = QPushButton("В группу")
+        self.move_button.setToolTip("Переместить все выбранные записи")
+        self.move_button.clicked.connect(self.move_selected_entries)
+        context_layout.addWidget(self.move_button)
+        self.enable_button = QPushButton("Включить")
+        self.enable_button.clicked.connect(lambda: self.set_selected_entries_enabled(True))
+        context_layout.addWidget(self.enable_button)
+        self.disable_button = QPushButton("Отключить")
+        self.disable_button.clicked.connect(lambda: self.set_selected_entries_enabled(False))
+        context_layout.addWidget(self.disable_button)
+        self.delete_button = QPushButton("Удалить")
+        self.delete_button.setObjectName("danger")
+        self.delete_button.setToolTip("Удалить все выбранные строки")
+        self.delete_button.clicked.connect(self.delete_entry)
+        context_layout.addWidget(self.delete_button)
+        root.addWidget(context_bar)
 
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(["Включено", "Домен", "Активный IP", "Происхождение", "Всего IP"])
@@ -1501,13 +1598,16 @@ class HostsApp(QMainWindow):
         header_view.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         header_view.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         header_view.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.doubleClicked.connect(lambda _index: self.edit_entry())
+        self.table.doubleClicked.connect(self.edit_table_row)
+        self.table.itemSelectionChanged.connect(self.update_selection_actions)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_table_context_menu)
         root.addWidget(self.table, 1)
 
         footer = QHBoxLayout()
-        hint = QLabel("Local state сохраняется автоматически")
-        hint.setObjectName("hint")
-        footer.addWidget(hint)
+        self.hosts_status = QLabel()
+        self.hosts_status.setToolTip("Локальное состояние сохраняется автоматически")
+        footer.addWidget(self.hosts_status)
         footer.addStretch()
         preview = QPushButton("Предпросмотр")
         preview.clicked.connect(self.preview_hosts)
@@ -1517,16 +1617,63 @@ class HostsApp(QMainWindow):
         save.clicked.connect(self.save_managed_block)
         footer.addWidget(save)
         root.addLayout(footer)
+        self.update_selection_actions()
+        self.refresh_hosts_status()
+
+    def refresh_filter_options(self) -> None:
+        def replace_options(
+            combo: QComboBox,
+            options: list[tuple[str, str]],
+        ) -> None:
+            selected = combo.currentData()
+            blocker = QSignalBlocker(combo)
+            combo.clear()
+            for label, value in options:
+                combo.addItem(label, value)
+            selected_index = combo.findData(selected)
+            combo.setCurrentIndex(selected_index if selected_index >= 0 else 0)
+            del blocker
+
+        replace_options(
+            self.group_filter,
+            [("Все группы", "")] + [(group.name, group.id) for group in self.groups],
+        )
+        replace_options(
+            self.source_filter,
+            [("Все источники", ""), ("Вручную", SOURCE_FILTER_MANUAL)]
+            + [(source.name, source.id) for source in self.sources],
+        )
 
     def refresh_table(self, selected_domain: str | None = None) -> None:
         self._refreshing = True
+        self.refresh_filter_options()
         blocker = QSignalBlocker(self.table)
         self.table.setRowCount(0)
+        query = self.search_edit.text()
+        state_filter = str(self.state_filter.currentData() or "")
+        group_filter = str(self.group_filter.currentData() or "")
+        source_filter = str(self.source_filter.currentData() or "")
+        filters_active = bool(query.strip() or state_filter or group_filter or source_filter)
         for group in self.groups:
+            total_entries = sum(entry.group_id == group.id for entry in self.entries.values())
             group_entries = sorted(
-                ((domain, entry) for domain, entry in self.entries.items() if entry.group_id == group.id),
+                (
+                    (domain, entry)
+                    for domain, entry in self.entries.items()
+                    if entry.group_id == group.id
+                    and entry_matches_filters(
+                        entry,
+                        self.origins,
+                        query=query,
+                        state_filter=state_filter,
+                        group_id=group_filter,
+                        source_id=source_filter,
+                    )
+                ),
                 key=lambda item: item[0],
             )
+            if not group_entries and filters_active:
+                continue
             header_row = self.table.rowCount()
             self.table.insertRow(header_row)
             self.table.setSpan(header_row, 0, 1, 5)
@@ -1538,6 +1685,13 @@ class HostsApp(QMainWindow):
             )
             group_layout = QHBoxLayout(group_cell)
             group_layout.setContentsMargins(14, 4, 14, 4)
+            collapse = QToolButton()
+            is_collapsed = group.id in self._collapsed_group_ids
+            collapse.setText("▸" if is_collapsed else "▾")
+            collapse.setToolTip("Развернуть группу" if is_collapsed else "Свернуть группу")
+            collapse.setAccessibleName(collapse.toolTip())
+            collapse.clicked.connect(lambda _checked=False, group_id=group.id: self.toggle_group_collapsed(group_id))
+            group_layout.addWidget(collapse)
             group_check = QCheckBox()
             group_check.setChecked(group.enabled)
             group_check.setToolTip("Включить или исключить группу из hosts, не меняя отдельные записи")
@@ -1546,13 +1700,16 @@ class HostsApp(QMainWindow):
             group_label = QLabel(group.name)
             group_label.setStyleSheet("font-weight: 700; color: #F1F1F5; background: transparent;")
             group_layout.addWidget(group_label)
-            count_label = QLabel(f"{len(group_entries)} записей")
+            count_text = f"{len(group_entries)} из {total_entries}" if filters_active else f"{total_entries} записей"
+            count_label = QLabel(count_text)
             count_label.setObjectName("hint")
             group_layout.addWidget(count_label)
             group_layout.addStretch()
             self.table.setCellWidget(header_row, 0, group_cell)
             self.table.setRowHeight(header_row, 40)
 
+            if is_collapsed:
+                continue
             for domain, entry in group_entries:
                 row = self.table.rowCount()
                 self.table.insertRow(row)
@@ -1572,6 +1729,7 @@ class HostsApp(QMainWindow):
                 domain_item = QTableWidgetItem(domain)
                 domain_item.setFont(monospace_font(HOSTS_TABLE_FONT_SIZE))
                 domain_item.setData(Qt.ItemDataRole.UserRole, domain)
+                domain_item.setToolTip(domain)
                 self.table.setItem(row, 1, domain_item)
 
                 combo = QComboBox()
@@ -1579,12 +1737,14 @@ class HostsApp(QMainWindow):
                 combo.setStyleSheet(f"font-size: {HOSTS_TABLE_FONT_SIZE}pt;")
                 combo.addItems(entry.ips)
                 combo.setCurrentText(entry.selected_ip)
+                combo.setToolTip("\n".join(entry.ips))
                 combo.currentTextChanged.connect(lambda ip, name=domain: self.set_selected_ip(name, ip))
                 self.table.setCellWidget(row, 2, combo)
 
                 origin = QTableWidgetItem(
                     format_pair_origin(self.origins.get((domain, entry.selected_ip)), self.sources)
                 )
+                origin.setToolTip(origin.text())
                 self.table.setItem(row, 3, origin)
 
                 count = QTableWidgetItem(str(len(entry.ips)))
@@ -1597,13 +1757,105 @@ class HostsApp(QMainWindow):
                         item.setForeground(muted)
                 if domain == selected_domain:
                     self.table.selectRow(row)
+        self.table.scrollToTop()
         del blocker
         self._refreshing = False
+        self.update_selection_actions()
+        self.refresh_hosts_status()
+
+    def toggle_group_collapsed(self, group_id: str) -> None:
+        if group_id in self._collapsed_group_ids:
+            self._collapsed_group_ids.remove(group_id)
+        else:
+            self._collapsed_group_ids.add(group_id)
+        self.refresh_table()
+
+    def edit_table_row(self, index: QModelIndex) -> None:
+        domain_item = self.table.item(index.row(), 1)
+        if domain_item is None or domain_item.data(Qt.ItemDataRole.UserRole) is None:
+            return
+        self.table.selectRow(index.row())
+        self.edit_entry()
+
+    def update_selection_actions(self) -> None:
+        domains = self.selected_domains()
+        selected_count = len(domains)
+        self.selection_label.setText(f"Выбрано: {selected_count}")
+        self.edit_button.setEnabled(selected_count == 1)
+        for button in (
+            self.move_button,
+            self.enable_button,
+            self.disable_button,
+            self.delete_button,
+        ):
+            button.setEnabled(selected_count > 0)
+
+    def set_selected_entries_enabled(self, enabled: bool) -> None:
+        domains = self.selected_domains()
+        changed = False
+        for domain in domains:
+            entry = self.entries.get(domain)
+            if entry is not None and entry.enabled != enabled:
+                entry.enabled = enabled
+                changed = True
+        if not changed:
+            return
+        self.persist_internal_state()
+        logger.info(
+            "selected_entries_toggled",
+            enabled=enabled,
+            entries_count=len(domains),
+        )
+        self.refresh_table()
+
+    def refresh_hosts_status(self) -> None:
+        count = count_unapplied_hosts_changes(
+            self.entries,
+            self.groups,
+            self._applied_hosts_snapshot,
+        )
+        if count:
+            self.hosts_status.setText(f"Не применено в hosts: {count}")
+            self.hosts_status.setStyleSheet(
+                "color: #F0C674; background: #302A1D; border-radius: 7px; padding: 6px 10px;"
+            )
+        else:
+            self.hosts_status.setText("Hosts актуален")
+            self.hosts_status.setStyleSheet(
+                "color: #8FD6A8; background: #1D3025; border-radius: 7px; padding: 6px 10px;"
+            )
+
+    def show_table_context_menu(self, position: QPoint) -> None:
+        index = self.table.indexAt(position)
+        if not index.isValid():
+            return
+        domain_item = self.table.item(index.row(), 1)
+        if domain_item is None:
+            return
+        domain = domain_item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(domain, str) or domain not in self.entries:
+            return
+        entry = self.entries[domain]
+        origin_item = self.table.item(index.row(), 3)
+        menu = QMenu(self)
+        copy_domain = menu.addAction("Копировать домен")
+        copy_ip = menu.addAction("Копировать активный IP")
+        copy_origin = menu.addAction("Копировать происхождение")
+        selected = menu.exec(self.table.viewport().mapToGlobal(position))
+        if selected == copy_domain:
+            QApplication.clipboard().setText(domain)
+        elif selected == copy_ip:
+            QApplication.clipboard().setText(entry.selected_ip)
+        elif selected == copy_origin and origin_item is not None:
+            QApplication.clipboard().setText(origin_item.text())
 
     def set_enabled(self, domain: str, state: int) -> None:
         if not self._refreshing and domain in self.entries:
             self.entries[domain].enabled = state == Qt.CheckState.Checked.value
             self.persist_internal_state()
+            self.refresh_hosts_status()
+            if self.state_filter.currentData():
+                QTimer.singleShot(0, self.refresh_table)
             logger.info("entry_toggled", domain=domain, enabled=self.entries[domain].enabled)
 
     def set_group_enabled(self, group_id: str, state: int) -> None:
@@ -1624,9 +1876,12 @@ class HostsApp(QMainWindow):
                 item = self.table.item(row, 1)
                 if item and item.data(Qt.ItemDataRole.UserRole) == domain:
                     origin = format_pair_origin(self.origins.get((domain, ip)), self.sources)
-                    self.table.setItem(row, 3, QTableWidgetItem(origin))
+                    origin_item = QTableWidgetItem(origin)
+                    origin_item.setToolTip(origin)
+                    self.table.setItem(row, 3, origin_item)
                     break
             self.persist_internal_state()
+            self.refresh_hosts_status()
             logger.info("entry_selected_ip_changed", domain=domain, selected_ip=ip)
 
     def selected_domains(self) -> list[str]:
@@ -1834,6 +2089,7 @@ class HostsApp(QMainWindow):
             backup = self.write_content_elevated(content)
         self.persist_internal_state()
         self._applied_hosts_snapshot = hosts_snapshot(self.entries, self.groups)
+        self.refresh_hosts_status()
         logger.info("hosts_saved", hosts_file=str(self.hosts_file), backup=str(backup))
         QMessageBox.information(self, APP_NAME, f"Hosts сохранён.\nРезервная копия:\n{backup}")
 

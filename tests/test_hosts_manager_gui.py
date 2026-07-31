@@ -12,12 +12,15 @@ from hmg.sources import Origins, PairOrigin, UrlSource
 from hmg.ui import (
     RETENTION_UNITS,
     SIZE_UNITS,
+    SOURCE_FILTER_MANUAL,
     HostsApp,
     build_side_by_side_diff,
     combine_measurement,
+    count_unapplied_hosts_changes,
     delete_entries_by_domain,
     delete_entries_from_internal_state,
     entries_snapshot,
+    entry_matches_filters,
     format_diff_status,
     format_numbered_diff_side,
     has_unapplied_hosts_changes,
@@ -453,6 +456,40 @@ def test_state_only_ip_change_does_not_count_as_unapplied_hosts_change() -> None
     assert has_unapplied_hosts_changes(entries, groups, applied)
 
 
+def test_count_unapplied_hosts_changes_counts_domains_not_diff_lines() -> None:
+    groups = [hmg.HostGroup(hmg.DEFAULT_GROUP_ID, hmg.DEFAULT_GROUP_NAME)]
+    entries = {
+        "changed.test": hmg.HostEntry("changed.test", ["127.0.0.1"]),
+        "new.test": hmg.HostEntry("new.test", ["10.0.0.1"]),
+        "disabled.test": hmg.HostEntry("disabled.test", ["192.168.1.1"], enabled=False),
+    }
+    applied = (("changed.test", "10.0.0.2"), ("removed.test", "::1"))
+
+    assert count_unapplied_hosts_changes(entries, groups, applied) == 3
+
+
+def test_entry_filters_match_domain_ip_state_group_and_source() -> None:
+    entry = hmg.HostEntry(
+        "api.example.test",
+        ["127.0.0.1", "10.0.0.1"],
+        group_id="work",
+    )
+    origins: Origins = {
+        ("api.example.test", "127.0.0.1"): PairOrigin(source_ids={"primary"}),
+        ("api.example.test", "10.0.0.1"): PairOrigin(manual=True),
+    }
+
+    assert entry_matches_filters(entry, origins, query="API.EXAMPLE")
+    assert entry_matches_filters(entry, origins, query="10.0.0")
+    assert entry_matches_filters(entry, origins, state_filter="enabled")
+    assert not entry_matches_filters(entry, origins, state_filter="disabled")
+    assert entry_matches_filters(entry, origins, group_id="work")
+    assert not entry_matches_filters(entry, origins, group_id="archive")
+    assert entry_matches_filters(entry, origins, source_id="primary")
+    assert entry_matches_filters(entry, origins, source_id=SOURCE_FILTER_MANUAL)
+    assert not entry_matches_filters(entry, origins, source_id="secondary")
+
+
 def test_move_multiple_entries_between_groups() -> None:
     groups = [
         hmg.HostGroup(hmg.DEFAULT_GROUP_ID, hmg.DEFAULT_GROUP_NAME),
@@ -689,13 +726,23 @@ def test_save_internal_state_persists_entries_groups_sources_and_origins(
 
 
 def test_entry_toggle_auto_saves_internal_state() -> None:
+    class NoFilter:
+        @staticmethod
+        def currentData() -> str:
+            return ""
+
     class ToggleApp:
         _refreshing = False
         entries = {"example.test": hmg.HostEntry("example.test", ["127.0.0.1"])}
+        state_filter = NoFilter()
         persist_calls = 0
 
         def persist_internal_state(self) -> None:
             self.persist_calls += 1
+
+        @staticmethod
+        def refresh_hosts_status() -> None:
+            return
 
     app = ToggleApp()
 
@@ -727,12 +774,45 @@ def test_selected_ip_change_auto_saves_internal_state() -> None:
         def persist_internal_state(self) -> None:
             self.persist_calls += 1
 
+        @staticmethod
+        def refresh_hosts_status() -> None:
+            return
+
     app = IpApp()
 
     HostsApp.set_selected_ip(app, "example.test", "10.0.0.1")  # type: ignore[arg-type]
 
     assert app.entries["example.test"].selected_ip == "10.0.0.1"
     assert app.persist_calls == 1
+
+
+def test_bulk_toggle_updates_selected_entries_and_saves_once() -> None:
+    class BulkApp:
+        entries = {
+            "first.test": hmg.HostEntry("first.test", ["127.0.0.1"]),
+            "second.test": hmg.HostEntry("second.test", ["10.0.0.1"], enabled=False),
+        }
+        persist_calls = 0
+        refresh_calls = 0
+
+        @staticmethod
+        def selected_domains() -> list[str]:
+            return ["first.test", "second.test"]
+
+        def persist_internal_state(self) -> None:
+            self.persist_calls += 1
+
+        def refresh_table(self) -> None:
+            self.refresh_calls += 1
+
+    app = BulkApp()
+
+    HostsApp.set_selected_entries_enabled(app, False)  # type: ignore[arg-type]
+
+    assert not app.entries["first.test"].enabled
+    assert not app.entries["second.test"].enabled
+    assert app.persist_calls == 1
+    assert app.refresh_calls == 1
 
 
 def test_canceling_sources_dialog_does_not_apply_its_changes(

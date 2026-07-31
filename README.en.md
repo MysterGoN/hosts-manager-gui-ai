@@ -77,6 +77,13 @@ file without changing the individual record switches. Groups and disabled record
 do not create comments in `hosts`: the managed block contains only enabled domains
 from enabled groups.
 
+The main list supports domain/IP search, filters by state, group, and source, and
+collapsible groups. Selecting one or more rows enables contextual actions for
+editing, moving, bulk enabling/disabling, and deleting records. The footer status
+shows how many domains are saved in local state but not yet applied to the system
+`hosts` file. Full domain and origin values are available through tooltips and
+context-menu copying.
+
 ## Checks
 
 ```bash
