@@ -1,3 +1,9 @@
+## v0.2.2 (2026-07-31)
+
+### Fix
+
+- **ci**: publish release assets after builds
+
 ## v0.2.1 (2026-07-31)
 
 ### Fix
