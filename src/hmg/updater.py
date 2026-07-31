@@ -15,7 +15,7 @@ import urllib.request
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any
 
 from hmg.sources import system_ssl_context
@@ -287,7 +287,7 @@ def download_asset(asset: ReleaseAsset, maximum_bytes: int, timeout: float = 30.
 
 def build_update_launch(
     prepared: PreparedUpdate,
-    executable_path: Path,
+    executable_path: PurePath,
     process_id: int,
     *,
     system: str | None = None,

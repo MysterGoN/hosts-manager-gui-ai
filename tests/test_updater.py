@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
 import urllib.error
 from email.message import Message
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
@@ -179,7 +180,8 @@ def test_prepare_update_downloads_and_verifies_installer(
     assert prepared.installer_path.read_bytes() == installer
     assert prepared.archive_path.read_bytes() == archive
     assert prepared.checksums_path.read_bytes() == checksums
-    assert prepared.installer_path.stat().st_mode & 0o700 == 0o700
+    if os.name != "nt":
+        assert prepared.installer_path.stat().st_mode & 0o700 == 0o700
 
 
 def test_build_update_launch_uses_current_install_location(tmp_path: Path) -> None:
@@ -192,18 +194,18 @@ def test_build_update_launch_uses_current_install_location(tmp_path: Path) -> No
 
     linux = build_update_launch(
         prepared,
-        Path("/opt/hosts-manager-gui/hosts-manager-gui"),
+        PurePosixPath("/opt/hosts-manager-gui/hosts-manager-gui"),
         123,
         system="Linux",
     )
     windows = build_update_launch(
         PreparedUpdate(
             release_info(),
-            Path("C:/Temp/install-windows.ps1"),
-            Path("C:/Temp/hosts-manager-gui-windows.zip"),
-            Path("C:/Temp/SHA256SUMS"),
+            tmp_path / "install-windows.ps1",
+            tmp_path / "hosts-manager-gui-windows.zip",
+            tmp_path / "SHA256SUMS.windows",
         ),
-        Path("C:/Users/Test/AppData/Local/Programs/HostsManagerGUI/hosts-manager-gui.exe"),
+        PureWindowsPath("C:/Users/Test/AppData/Local/Programs/HostsManagerGUI/hosts-manager-gui.exe"),
         456,
         system="Windows",
     )
@@ -214,7 +216,7 @@ def test_build_update_launch_uses_current_install_location(tmp_path: Path) -> No
             tmp_path / "hosts-manager-gui-macos.tar.gz",
             tmp_path / "SHA256SUMS",
         ),
-        Path("/Users/test/Applications/Hosts Manager GUI.app/Contents/MacOS/hosts-manager-gui"),
+        PurePosixPath("/Users/test/Applications/Hosts Manager GUI.app/Contents/MacOS/hosts-manager-gui"),
         789,
         system="Darwin",
     )
@@ -225,6 +227,8 @@ def test_build_update_launch_uses_current_install_location(tmp_path: Path) -> No
     assert linux.environment["HMG_ARCHIVE_PATH"] == str(prepared.archive_path)
     assert linux.start_new_session
     assert "-ArchivePath" in windows.command
+    install_dir_index = windows.command.index("-InstallDir") + 1
+    assert windows.command[install_dir_index] == r"C:\Users\Test\AppData\Local\Programs\HostsManagerGUI"
     assert "-WaitForProcessId" in windows.command
     assert windows.command[-1] == "456"
     assert macos.environment["HMG_APPLICATIONS_DIR"] == "/Users/test/Applications"
