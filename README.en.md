@@ -20,8 +20,10 @@ make setup
 make run
 ```
 
-The application stores extended domain state separately, shows a diff before
-writing, and requests administrator privileges when necessary.
+The application stores extended domain state separately and automatically saves
+record, group, and source changes to local state. The system `hosts` file changes
+only after manually reviewing the diff; the application requests administrator
+privileges when necessary.
 
 ## Settings and directories
 
@@ -51,10 +53,12 @@ The URL Sources window can store multiple HTTP/HTTPS addresses and define their
 application order. Standard hosts format (`IP domain`), CSV/TSV, JSON, and
 `domain IP` format are supported.
 
-- Update only adds source data.
+- Load New only adds source data.
 - Synchronize also removes relationships that disappeared from a source.
 - Replace Entirely builds the list only from enabled sources.
 
+Source-list changes are applied with Save or one of the loading actions. Cancel
+closes the window without changing the configured sources.
 The origin of every domain/IP pair is tracked separately in `sources.json`.
 Manual records and their Enabled state are preserved during synchronization.
 Every URL-source action updates only the application's internal state. The system

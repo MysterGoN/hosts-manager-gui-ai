@@ -3,6 +3,8 @@ import re
 from pathlib import Path
 
 import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QDialog
 
 import hmg.core as hmg
 import hmg.ui as ui_module
@@ -18,10 +20,12 @@ from hmg.ui import (
     entries_snapshot,
     format_diff_status,
     format_numbered_diff_side,
+    has_unapplied_hosts_changes,
     hosts_snapshot,
     move_entries_to_group,
     reconcile_persisted_entries,
     remove_group,
+    save_internal_state,
     split_measurement,
     summarize_diff_rows,
 )
@@ -435,6 +439,20 @@ def test_hosts_snapshot_respects_entry_and_group_switches() -> None:
     assert entries["group.test"].enabled
 
 
+def test_state_only_ip_change_does_not_count_as_unapplied_hosts_change() -> None:
+    groups = [hmg.HostGroup(hmg.DEFAULT_GROUP_ID, hmg.DEFAULT_GROUP_NAME)]
+    entries = {"example.test": hmg.HostEntry("example.test", ["127.0.0.1"])}
+    applied = hosts_snapshot(entries, groups)
+
+    entries["example.test"].add_ips(["10.0.0.1"])
+
+    assert not has_unapplied_hosts_changes(entries, groups, applied)
+
+    entries["example.test"].selected_ip = "10.0.0.1"
+
+    assert has_unapplied_hosts_changes(entries, groups, applied)
+
+
 def test_move_multiple_entries_between_groups() -> None:
     groups = [
         hmg.HostGroup(hmg.DEFAULT_GROUP_ID, hmg.DEFAULT_GROUP_NAME),
@@ -635,6 +653,120 @@ def test_delete_entries_from_internal_state_persists_entries_and_origins(
     assert removed == ["delete.test"]
     assert saved_entries == [{"keep.test"}]
     assert saved_origins == [{("keep.test", "::1")}]
+
+
+def test_save_internal_state_persists_entries_groups_sources_and_origins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entries = {"example.test": hmg.HostEntry("example.test", ["127.0.0.1"])}
+    groups = [hmg.HostGroup(hmg.DEFAULT_GROUP_ID, hmg.DEFAULT_GROUP_NAME)]
+    sources = [UrlSource("Primary", "https://example.test/hosts", id="source")]
+    origins: Origins = {("example.test", "127.0.0.1"): PairOrigin(manual=True)}
+    calls: list[str] = []
+
+    def fake_save_state(
+        current_entries: dict[str, hmg.HostEntry],
+        current_groups: list[hmg.HostGroup],
+    ) -> None:
+        assert current_entries is entries
+        assert current_groups is groups
+        calls.append("state")
+
+    def fake_save_sources_state(
+        current_sources: list[UrlSource],
+        current_origins: Origins,
+    ) -> None:
+        assert current_sources is sources
+        assert current_origins is origins
+        calls.append("sources")
+
+    monkeypatch.setattr(ui_module, "save_state", fake_save_state)
+    monkeypatch.setattr(ui_module, "save_sources_state", fake_save_sources_state)
+
+    save_internal_state(entries, groups, sources, origins)
+
+    assert calls == ["state", "sources"]
+
+
+def test_entry_toggle_auto_saves_internal_state() -> None:
+    class ToggleApp:
+        _refreshing = False
+        entries = {"example.test": hmg.HostEntry("example.test", ["127.0.0.1"])}
+        persist_calls = 0
+
+        def persist_internal_state(self) -> None:
+            self.persist_calls += 1
+
+    app = ToggleApp()
+
+    HostsApp.set_enabled(app, "example.test", Qt.CheckState.Unchecked.value)  # type: ignore[arg-type]
+
+    assert not app.entries["example.test"].enabled
+    assert app.persist_calls == 1
+
+
+def test_selected_ip_change_auto_saves_internal_state() -> None:
+    class EmptyTable:
+        @staticmethod
+        def rowCount() -> int:
+            return 0
+
+    class IpApp:
+        _refreshing = False
+        entries = {
+            "example.test": hmg.HostEntry(
+                "example.test",
+                ["127.0.0.1", "10.0.0.1"],
+            )
+        }
+        table = EmptyTable()
+        sources: list[UrlSource] = []
+        origins: Origins = {}
+        persist_calls = 0
+
+        def persist_internal_state(self) -> None:
+            self.persist_calls += 1
+
+    app = IpApp()
+
+    HostsApp.set_selected_ip(app, "example.test", "10.0.0.1")  # type: ignore[arg-type]
+
+    assert app.entries["example.test"].selected_ip == "10.0.0.1"
+    assert app.persist_calls == 1
+
+
+def test_canceling_sources_dialog_does_not_apply_its_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = [UrlSource("Primary", "https://example.test/hosts", id="source")]
+
+    class RejectedSourcesDialog:
+        action = None
+
+        def __init__(self, _parent: object, _sources: list[UrlSource]) -> None:
+            self.sources: list[UrlSource] = []
+
+        def exec(self) -> QDialog.DialogCode:
+            return QDialog.DialogCode.Rejected
+
+    class DummyApp:
+        sources = original
+        entries = {"example.test": hmg.HostEntry("example.test", ["127.0.0.1"])}
+        origins: Origins = {("example.test", "127.0.0.1"): PairOrigin(source_ids={"source"})}
+        groups = [hmg.HostGroup(hmg.DEFAULT_GROUP_ID, hmg.DEFAULT_GROUP_NAME)]
+        persist_calls = 0
+
+        def persist_internal_state(self) -> None:
+            self.persist_calls += 1
+
+    monkeypatch.setattr(ui_module, "SourcesDialog", RejectedSourcesDialog)
+    app = DummyApp()
+
+    HostsApp.manage_sources(app)  # type: ignore[arg-type]
+
+    assert app.sources == original
+    assert app.persist_calls == 0
+    assert "example.test" in app.entries
 
 
 def test_copy_data_files_preserves_existing_destination_files(tmp_path: Path) -> None:

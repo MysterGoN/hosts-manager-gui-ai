@@ -283,6 +283,24 @@ def hosts_snapshot(
     )
 
 
+def has_unapplied_hosts_changes(
+    entries: dict[str, HostEntry],
+    groups: list[HostGroup],
+    applied_snapshot: HostsSnapshot,
+) -> bool:
+    return hosts_snapshot(entries, groups) != applied_snapshot
+
+
+def save_internal_state(
+    entries: dict[str, HostEntry],
+    groups: list[HostGroup],
+    sources: list[UrlSource],
+    origins: Origins,
+) -> None:
+    save_state(entries, groups)
+    save_sources_state(sources, origins)
+
+
 def move_entries_to_group(
     entries: dict[str, HostEntry],
     domains: list[str],
@@ -376,9 +394,9 @@ def delete_entries_from_internal_state(
     if removed:
         if groups is None:
             save_state(entries)
+            save_sources_state(sources, origins)
         else:
-            save_state(entries, groups)
-        save_sources_state(sources, origins)
+            save_internal_state(entries, groups, sources, origins)
     return removed
 
 
@@ -892,11 +910,14 @@ class SourcesDialog(QDialog):
         layout.addLayout(edit_row)
 
         actions = QHBoxLayout()
-        close = QPushButton("Закрыть")
-        close.clicked.connect(self.reject)
-        actions.addWidget(close)
+        cancel = QPushButton("Отмена")
+        cancel.clicked.connect(self.reject)
+        actions.addWidget(cancel)
+        save = QPushButton("Сохранить")
+        save.clicked.connect(self.accept)
+        actions.addWidget(save)
         actions.addStretch()
-        update = QPushButton("Обновить")
+        update = QPushButton("Загрузить новые")
         update.setToolTip("Добавить новые данные во внутреннее состояние, ничего не удаляя")
         update.clicked.connect(lambda: self.choose_action("update"))
         actions.addWidget(update)
@@ -1358,7 +1379,7 @@ class HostsApp(QMainWindow):
         self.groups: list[HostGroup] = []
         self.sources: list[UrlSource] = []
         self.origins: Origins = {}
-        self._saved_snapshot: HostsSnapshot = ()
+        self._applied_hosts_snapshot: HostsSnapshot = ()
         self._refreshing = False
 
         self.load_initial_data()
@@ -1382,14 +1403,18 @@ class HostsApp(QMainWindow):
         )
         self.sources, stored_origins = load_sources_state()
         self.origins = normalize_origins(self.entries, stored_origins)
-        self._saved_snapshot = hosts_snapshot(applied_entries)
+        self._applied_hosts_snapshot = hosts_snapshot(applied_entries)
         logger.info(
             "initial_data_loaded",
             state_entries_count=len(state_entries),
             hosts_entries_count=len(hosts_entries),
             visible_entries_count=len(self.entries),
             groups_count=len(self.groups),
-            has_pending_hosts_changes=hosts_snapshot(self.entries, self.groups) != self._saved_snapshot,
+            has_pending_hosts_changes=has_unapplied_hosts_changes(
+                self.entries,
+                self.groups,
+                self._applied_hosts_snapshot,
+            ),
         )
 
     def create_widgets(self) -> None:
@@ -1409,7 +1434,8 @@ class HostsApp(QMainWindow):
         titles.addWidget(subtitle)
         header.addLayout(titles)
         header.addStretch()
-        refresh = QPushButton("Обновить")
+        refresh = QPushButton("Перечитать с диска")
+        refresh.setToolTip("Заново прочитать local state и системный hosts")
         refresh.clicked.connect(self.reload)
         header.addWidget(refresh)
         settings_button = QPushButton("Настройки")
@@ -1479,7 +1505,7 @@ class HostsApp(QMainWindow):
         root.addWidget(self.table, 1)
 
         footer = QHBoxLayout()
-        hint = QLabel("При сохранении система автоматически запросит права администратора")
+        hint = QLabel("Local state сохраняется автоматически")
         hint.setObjectName("hint")
         footer.addWidget(hint)
         footer.addStretch()
@@ -1577,6 +1603,7 @@ class HostsApp(QMainWindow):
     def set_enabled(self, domain: str, state: int) -> None:
         if not self._refreshing and domain in self.entries:
             self.entries[domain].enabled = state == Qt.CheckState.Checked.value
+            self.persist_internal_state()
             logger.info("entry_toggled", domain=domain, enabled=self.entries[domain].enabled)
 
     def set_group_enabled(self, group_id: str, state: int) -> None:
@@ -1586,7 +1613,7 @@ class HostsApp(QMainWindow):
         if group is None:
             return
         group.enabled = state == Qt.CheckState.Checked.value
-        save_state(self.entries, self.groups)
+        self.persist_internal_state()
         logger.info("group_toggled", group_id=group_id, enabled=group.enabled)
         self.refresh_table()
 
@@ -1599,6 +1626,7 @@ class HostsApp(QMainWindow):
                     origin = format_pair_origin(self.origins.get((domain, ip)), self.sources)
                     self.table.setItem(row, 3, QTableWidgetItem(origin))
                     break
+            self.persist_internal_state()
             logger.info("entry_selected_ip_changed", domain=domain, selected_ip=ip)
 
     def selected_domains(self) -> list[str]:
@@ -1623,7 +1651,7 @@ class HostsApp(QMainWindow):
         if dialog.exec() != QDialog.DialogCode.Accepted or dialog.result_groups is None:
             return
         self.groups = normalize_groups(self.entries, dialog.result_groups)
-        save_state(self.entries, self.groups)
+        self.persist_internal_state()
         self.refresh_table()
         logger.info("groups_updated", groups_count=len(self.groups))
 
@@ -1652,20 +1680,14 @@ class HostsApp(QMainWindow):
         moved = move_entries_to_group(self.entries, domains, group.id, self.groups)
         if not moved:
             return
-        save_state(self.entries, self.groups)
+        self.persist_internal_state()
         self.refresh_table(moved[0] if len(moved) == 1 else None)
         logger.info("entries_moved_to_group", group_id=group.id, moved_count=len(moved))
 
     def reload(self) -> None:
-        answer = QMessageBox.question(
-            self,
-            APP_NAME,
-            "Обновить данные из состояния и файла hosts?\nНесохранённые изменения будут потеряны.",
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
         self.load_initial_data()
         self.refresh_table()
+        logger.info("data_reloaded_from_disk")
 
     def add_entry(self) -> None:
         dialog = EntryDialog(self)
@@ -1682,6 +1704,7 @@ class HostsApp(QMainWindow):
         else:
             self.entries[entry.domain] = entry
         mark_domain_manual(self.origins, self.entries[entry.domain])
+        self.persist_internal_state()
         logger.info("entry_added", domain=entry.domain, ips_count=len(entry.ips), entries_count=len(self.entries))
         self.refresh_table(entry.domain)
 
@@ -1704,6 +1727,7 @@ class HostsApp(QMainWindow):
         remove_domain_origins(self.origins, domain)
         self.entries[new.domain] = new
         mark_domain_manual(self.origins, new)
+        self.persist_internal_state()
         logger.info("entry_edited", old_domain=domain, new_domain=new.domain, ips_count=len(new.ips))
         self.refresh_table(new.domain)
 
@@ -1764,8 +1788,7 @@ class HostsApp(QMainWindow):
                 for domain in incoming:
                     mark_domain_manual(self.origins, self.entries[domain])
             self.refresh_table()
-            save_state(self.entries, self.groups)
-            save_sources_state(self.sources, self.origins)
+            self.persist_internal_state()
             QMessageBox.information(
                 self,
                 APP_NAME,
@@ -1809,9 +1832,8 @@ class HostsApp(QMainWindow):
             backup = write_hosts(self.hosts_file, content)
         except PermissionError:
             backup = self.write_content_elevated(content)
-        save_state(self.entries, self.groups)
-        save_sources_state(self.sources, self.origins)
-        self._saved_snapshot = hosts_snapshot(self.entries, self.groups)
+        self.persist_internal_state()
+        self._applied_hosts_snapshot = hosts_snapshot(self.entries, self.groups)
         logger.info("hosts_saved", hosts_file=str(self.hosts_file), backup=str(backup))
         QMessageBox.information(self, APP_NAME, f"Hosts сохранён.\nРезервная копия:\n{backup}")
 
@@ -1878,10 +1900,20 @@ class HostsApp(QMainWindow):
             if source.exists() and not destination.exists():
                 shutil.copy2(source, destination)
 
+    def persist_internal_state(self) -> None:
+        save_internal_state(
+            self.entries,
+            self.groups,
+            self.sources,
+            self.origins,
+        )
+
     def manage_sources(self) -> None:
         previous_sources = {source.id: source for source in self.sources}
         dialog = SourcesDialog(self, self.sources)
         result = dialog.exec()
+        if result != QDialog.DialogCode.Accepted:
+            return
         self.sources = dialog.sources
 
         removed_ids = set(previous_sources) - {source.id for source in self.sources}
@@ -1895,10 +1927,9 @@ class HostsApp(QMainWindow):
             )
         if removed_ids:
             self.refresh_table()
-            save_state(self.entries, self.groups)
-        save_sources_state(self.sources, self.origins)
+        self.persist_internal_state()
 
-        if result != QDialog.DialogCode.Accepted or dialog.action is None:
+        if dialog.action is None:
             return
         self.apply_sources_action(dialog.action)
 
@@ -1940,8 +1971,7 @@ class HostsApp(QMainWindow):
         self.entries = candidate_entries
         self.origins = candidate_origins
         self.refresh_table()
-        save_state(self.entries, self.groups)
-        save_sources_state(self.sources, self.origins)
+        self.persist_internal_state()
         logger.info("url_sources_applied", action=action, sources_count=len(fetched), entries_count=len(self.entries))
         QMessageBox.information(
             self,
@@ -1952,19 +1982,24 @@ class HostsApp(QMainWindow):
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        if hosts_snapshot(self.entries, self.groups) == self._saved_snapshot:
+        if not has_unapplied_hosts_changes(
+            self.entries,
+            self.groups,
+            self._applied_hosts_snapshot,
+        ):
             event.accept()
             return
 
         answer = QMessageBox.warning(
             self,
-            "Есть несохранённые изменения",
-            "Изменения ещё не сохранены в hosts.\n\nЗакрыть программу без сохранения?",
+            "Есть неприменённые изменения",
+            "Все изменения сохранены в local state, но ещё не применены в hosts.\n\n"
+            "Закрыть приложение без применения в hosts?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if answer == QMessageBox.StandardButton.Yes:
-            logger.info("app_closed_with_unsaved_changes")
+            logger.info("app_closed_with_unapplied_hosts_changes")
             event.accept()
         else:
             event.ignore()
