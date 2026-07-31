@@ -6,6 +6,9 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build ${{ matrix.name }}
@@ -28,7 +31,7 @@ jobs:
             path: dist/hosts-manager-gui
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
@@ -62,8 +65,50 @@ jobs:
         run: uv run pyinstaller --noconfirm --clean packaging/hosts-manager-gui.spec
 
       - name: Upload application
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.path }}
           if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download built applications
+        uses: actions/download-artifact@v8
+        with:
+          path: dist/artifacts
+
+      - name: Package release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/release
+          chmod +x dist/artifacts/hosts-manager-gui-linux/hosts-manager-gui
+          chmod +x dist/artifacts/hosts-manager-gui-macos/hosts-manager-gui
+          tar -czf dist/release/hosts-manager-gui-linux.tar.gz \
+            -C dist/artifacts/hosts-manager-gui-linux hosts-manager-gui
+          tar -czf dist/release/hosts-manager-gui-macos.tar.gz \
+            -C dist/artifacts/hosts-manager-gui-macos hosts-manager-gui
+          zip -j dist/release/hosts-manager-gui-windows.zip \
+            dist/artifacts/hosts-manager-gui-windows/hosts-manager-gui.exe
+          cd dist/release
+          sha256sum hosts-manager-gui-* > SHA256SUMS
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/release/* \
+            --verify-tag \
+            --generate-notes \
+            --title "$GITHUB_REF_NAME"

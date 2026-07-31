@@ -187,7 +187,11 @@ git push --follow-tags
 `make release` выполняет проверки, синхронно обновляет версию в `pyproject.toml`
 и `uv.lock`, дополняет `CHANGELOG.md`, создаёт release-коммит и аннотированный
 тег `vX.Y.Z`. Команда ничего не отправляет в удалённый репозиторий; явный push
-тега запускает build-матрицу GitHub Actions.
+тега запускает build-матрицу GitHub Actions. После успешной сборки на всех трёх
+платформах workflow создаёт GitHub Release с автоматически сформированными notes
+и прикрепляет `hosts-manager-gui-linux.tar.gz`, `hosts-manager-gui-windows.zip`,
+`hosts-manager-gui-macos.tar.gz` и файл контрольных сумм `SHA256SUMS`. Ручной
+запуск workflow создаёт только Actions artifacts и не публикует Release без тега.
 
 ## Сборка приложения
 

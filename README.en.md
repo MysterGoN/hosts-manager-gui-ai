@@ -188,7 +188,12 @@ git push --follow-tags
 `make release` runs the checks, updates the version in `pyproject.toml` and
 `uv.lock` together, updates `CHANGELOG.md`, creates a release commit, and creates
 an annotated `vX.Y.Z` tag. It does not push anything to the remote repository;
-explicitly pushing the tag triggers the GitHub Actions build matrix.
+explicitly pushing the tag triggers the GitHub Actions build matrix. After all
+three platform builds succeed, the workflow creates a GitHub Release with
+automatically generated notes and attaches `hosts-manager-gui-linux.tar.gz`,
+`hosts-manager-gui-windows.zip`, `hosts-manager-gui-macos.tar.gz`, and the
+`SHA256SUMS` checksum file. A manual workflow run creates Actions artifacts only
+and does not publish a Release without a tag.
 
 ## Building the application
 
