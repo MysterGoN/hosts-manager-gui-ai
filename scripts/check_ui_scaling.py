@@ -114,7 +114,9 @@ def check_scale(scale: str) -> int:
     for dialog in dialogs:
         dialog.show()
         application.processEvents()
-        minimum = dialog.minimumSizeHint()
+        # Explicit minimum sizes override layout hints. The hints vary with
+        # platform font metrics and are not effective constraints in that case.
+        minimum = dialog.minimumSize()
         actual = dialog.size()
         if actual.width() < minimum.width() or actual.height() < minimum.height():
             failures.append(
