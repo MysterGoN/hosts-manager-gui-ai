@@ -1,0 +1,36 @@
+## v0.2.0 (2026-07-31)
+
+### Feat
+
+- **ui**: improve accessibility and scaling
+- **ui**: improve diff review and feedback
+- **ui**: preview imports and URL sync
+- **ui**: add list filters and contextual actions
+- **ui**: auto-save local state
+- **groups**: organize hosts into persistent groups
+- **settings**: add measurement selectors and minimum dialog size
+- **ui**: persist source sync state and support bulk deletion
+- **build**: add cross-platform packaging and Docker builds
+- **sources**: sync hosts from URL sources
+- **ui**: migrate interface to PySide6
+- **ui**: use active status marker
+- **logging**: add application logger
+- **import**: add modal text import
+- preview hmg block changes
+- **ui**: improve hosts table editing
+- add elevated hosts saving
+- add makefile
+- add project
+
+### Fix
+
+- **ci**: make desktop build cross-platform
+- **ui**: handle terminal interrupt
+- **ui**: warn about unsaved changes on exit
+- **ui**: enlarge hosts table text
+- **core**: preserve unchanged generation timestamp
+
+### Refactor
+
+- **ui**: add help and optimize group toggles
+- rename package to hmg
