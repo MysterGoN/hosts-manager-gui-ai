@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, QPoint, QSignalBlocker, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QModelIndex, QPoint, QRectF, QSignalBlocker, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QCloseEvent,
     QColor,
@@ -20,8 +20,11 @@ from PySide6.QtGui import (
     QFontDatabase,
     QKeySequence,
     QPainter,
+    QPainterPath,
     QPaintEvent,
     QPen,
+    QRegion,
+    QResizeEvent,
     QShortcut,
     QTextCursor,
     QTextFormat,
@@ -53,6 +56,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QTextBrowser,
     QTextEdit,
     QToolButton,
     QVBoxLayout,
@@ -276,11 +280,8 @@ QCheckBox::indicator, QRadioButton::indicator {
     height: 18px;
 }
 QCheckBox:focus, QRadioButton:focus {
-    color: #FFFFFF;
-    background: #29243D;
-    border: 1px solid #A78BFA;
-    border-radius: 6px;
-    padding: 3px;
+    color: #C4B5FD;
+    font-weight: 600;
 }
 QRadioButton::indicator {
     border: 2px solid #626673;
@@ -505,6 +506,44 @@ def format_pair_origin(origin: PairOrigin | None, sources: list[UrlSource]) -> s
     labels.extend(source.name for source in sources if source.id in origin.source_ids)
     labels.extend(sorted(origin.source_ids - known_ids))
     return " · ".join(labels) or "Вручную"
+
+
+class RoundedTableWidget(QTableWidget):
+    """Clip child viewports and headers to the same radius as the table border."""
+
+    CORNER_RADIUS = 10.0
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        bounds = QRectF(self.rect().adjusted(0, 0, -1, -1))
+        path = QPainterPath()
+        path.addRoundedRect(bounds, self.CORNER_RADIUS, self.CORNER_RADIUS)
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+
+
+class VisibleCheckBox(QCheckBox):
+    """Draw a high-contrast checkbox indicator consistently across Qt themes."""
+
+    INDICATOR_SIZE = 18
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        top = (self.height() - self.INDICATOR_SIZE) // 2
+        indicator = QRectF(1, top, self.INDICATOR_SIZE, self.INDICATOR_SIZE)
+        border = "#A78BFA" if self.hasFocus() else "#626673"
+        background = "#7C5CFC" if self.isChecked() else "#17191F"
+        if not self.isEnabled():
+            border = "#454955"
+            background = "#252832"
+        painter.setPen(QPen(QColor(border), 2))
+        painter.setBrush(QColor(background))
+        painter.drawRoundedRect(indicator, 4, 4)
+        if self.isChecked():
+            painter.setPen(QPen(QColor("#FFFFFF"), 2))
+            painter.drawLine(5, top + 9, 9, top + 13)
+            painter.drawLine(9, top + 13, 15, top + 6)
 
 
 class DiffTextEdit(QPlainTextEdit):
@@ -932,6 +971,69 @@ def format_diff_status(stats: DiffStats) -> str:
     return f"Добавлено: {stats['added']} · Удалено: {stats['removed']} · Изменено: {stats['changed']}"
 
 
+class HelpDialog(QDialog):
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Справка — Hosts Manager")
+        self.setMinimumSize(720, 600)
+        self.resize(780, 680)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        title = QLabel("Справка")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+
+        help_text = QTextBrowser()
+        help_text.setAccessibleName("Справка по Hosts Manager")
+        help_text.setOpenExternalLinks(True)
+        help_text.setHtml(
+            """
+            <h2>Как устроено сохранение</h2>
+            <p><b>Local state</b> сохраняется автоматически после изменений. Системный файл
+            <code>hosts</code> меняется только после нажатия <b>Сохранить в hosts</b> и
+            подтверждения в окне diff.</p>
+
+            <h2>Записи и группы</h2>
+            <ul>
+              <li>У домена может быть несколько IP, но в <code>hosts</code> используется выбранный активный IP.</li>
+              <li>Отключённая запись не записывается в <code>hosts</code>.</li>
+              <li>Отключение группы исключает из <code>hosts</code> всю группу, не меняя состояния её записей.</li>
+              <li>Новые записи из импорта и URL сначала попадают в группу <b>Default</b>.</li>
+            </ul>
+
+            <h2>Импорт и URL-источники</h2>
+            <p>Импорт принимает TXT, CSV/TSV и JSON. Управление URL находится в
+            <b>Источники</b>, а загрузка запускается отдельно через <b>Загрузка из URL</b>.
+            Перед применением всегда показывается preview.</p>
+
+            <h2>Клавиатура</h2>
+            <table cellspacing="6">
+              <tr><td><code>Ctrl/Cmd+N</code></td><td>Добавить запись</td></tr>
+              <tr><td><code>Ctrl/Cmd+I</code></td><td>Импорт</td></tr>
+              <tr><td><code>Ctrl/Cmd+F</code></td><td>Поиск</td></tr>
+              <tr><td><code>Ctrl/Cmd+P</code></td><td>Предпросмотр hosts</td></tr>
+              <tr><td><code>Ctrl/Cmd+S</code></td><td>Проверить и сохранить в hosts</td></tr>
+              <tr><td><code>Ctrl/Cmd+,</code></td><td>Настройки</td></tr>
+              <tr><td><code>F1</code></td><td>Открыть эту справку</td></tr>
+              <tr><td><code>F5</code></td><td>Перечитать данные с диска</td></tr>
+              <tr><td><code>F7 / Shift+F7</code></td><td>Следующее / предыдущее изменение в diff</td></tr>
+            </table>
+
+            <h2>Если что-то пошло не так</h2>
+            <p>Пути к данным и логам находятся в <b>Настройки</b>. Кнопка
+            <b>Папка состояния</b> открывает каталог с <code>state.json</code> и
+            <code>sources.json</code>. Перед записью в hosts создаётся резервная копия.</p>
+            """
+        )
+        layout.addWidget(help_text, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.button(QDialogButtonBox.StandardButton.Close).setText("Закрыть")
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
 class EntryDialog(QDialog):
     def __init__(self, parent: QWidget, entry: HostEntry | None = None) -> None:
         super().__init__(parent)
@@ -965,7 +1067,7 @@ class EntryDialog(QDialog):
         hint = QLabel("Один IP на строку или через точку с запятой / пробел")
         hint.setObjectName("hint")
         form.addRow("", hint)
-        self.enabled_check = QCheckBox("Запись включена")
+        self.enabled_check = VisibleCheckBox("Запись включена")
         self.enabled_check.setChecked(entry.enabled if entry else True)
         form.addRow("", self.enabled_check)
         layout.addLayout(form)
@@ -1160,7 +1262,7 @@ class SourceEditDialog(QDialog):
         self.url_edit.setPlaceholderText("https://example.com/hosts")
         self.url_edit.setAccessibleName("Адрес URL-источника")
         form.addRow("URL", self.url_edit)
-        self.enabled_check = QCheckBox("Использовать при синхронизации")
+        self.enabled_check = VisibleCheckBox("Использовать при синхронизации")
         self.enabled_check.setChecked(source.enabled if source else True)
         form.addRow("", self.enabled_check)
         layout.addLayout(form)
@@ -1208,7 +1310,7 @@ class SourcesDialog(QDialog):
         hint.setObjectName("hint")
         layout.addWidget(hint)
 
-        self.table = QTableWidget(0, 3)
+        self.table = RoundedTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Активен", "Название", "URL"])
         self.table.setAccessibleName("URL-источники")
         self.table.setAccessibleDescription("Таблица активных состояний, названий и адресов источников")
@@ -1254,7 +1356,7 @@ class SourcesDialog(QDialog):
         self.table.setRowCount(0)
         for row, source in enumerate(self.sources):
             self.table.insertRow(row)
-            check = QCheckBox()
+            check = VisibleCheckBox()
             check.setChecked(source.enabled)
             check.setAccessibleName(f"Использовать источник {source.name}")
             check.setToolTip(check.accessibleName())
@@ -1438,7 +1540,7 @@ class SourceSyncPreview(QDialog):
         status.setObjectName("subtitle")
         layout.addWidget(status)
 
-        table = QTableWidget(0, 4)
+        table = RoundedTableWidget(0, 4)
         table.setHorizontalHeaderLabels(["Источник", "Результат", "Домены", "Подробности"])
         table.setAccessibleName("Результаты загрузки URL-источников")
         table.setAccessibleDescription("Для каждого источника показан успех или ошибка загрузки")
@@ -1530,7 +1632,7 @@ class GroupsDialog(QDialog):
         hint.setObjectName("hint")
         layout.addWidget(hint)
 
-        self.table = QTableWidget(0, 3)
+        self.table = RoundedTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Активна", "Название", "Записей"])
         self.table.setAccessibleName("Группы доменов")
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -1578,7 +1680,7 @@ class GroupsDialog(QDialog):
         self.table.setRowCount(0)
         for row, group in enumerate(self.groups):
             self.table.insertRow(row)
-            check = QCheckBox()
+            check = VisibleCheckBox()
             check.setChecked(group.enabled)
             check.setToolTip("Исключить или включить всю группу в hosts")
             check.setAccessibleName(f"Включить группу {group.name} в hosts")
@@ -1775,9 +1877,21 @@ class SettingsDialog(QDialog):
             "Срок хранения",
             self._measurement_input(self.log_retention_spin, self.log_retention_unit_combo),
         )
-        self.dev_file_check = QCheckBox("Писать в файл также в режиме разработки")
+        self.dev_file_check = VisibleCheckBox("Писать в файл также в режиме разработки")
+        self.dev_file_check.setMinimumHeight(32)
         self.dev_file_check.setChecked(settings.log_to_file_in_dev)
-        logs_form.addRow("", self.dev_file_check)
+        self.dev_file_state = QLabel()
+        self.dev_file_state.setAccessibleName("Состояние файлового лога в режиме разработки")
+        dev_file_row = QWidget()
+        dev_file_layout = QHBoxLayout(dev_file_row)
+        dev_file_layout.setContentsMargins(0, 0, 0, 0)
+        dev_file_layout.setSpacing(12)
+        dev_file_layout.addWidget(self.dev_file_check)
+        dev_file_layout.addWidget(self.dev_file_state)
+        dev_file_layout.addStretch()
+        logs_form.addRow("", dev_file_row)
+        self.dev_file_check.toggled.connect(self.update_dev_file_state)
+        self.update_dev_file_state(self.dev_file_check.isChecked())
         mode_hint = QLabel(
             "Текущий режим: packaged — только файл" if is_packaged() else "Текущий режим: development — stdout"
         )
@@ -1820,6 +1934,18 @@ class SettingsDialog(QDialog):
     def update_log_retention_range(self, unit: str) -> None:
         factor = RETENTION_UNITS[unit]
         self.log_retention_spin.setRange(1, MAX_LOG_RETENTION_SECONDS // factor)
+
+    def update_dev_file_state(self, enabled: bool) -> None:
+        if enabled:
+            self.dev_file_state.setText("Включено")
+            self.dev_file_state.setStyleSheet(
+                "color: #8FD6A8; background: #1D3025; border-radius: 6px; padding: 4px 8px;"
+            )
+        else:
+            self.dev_file_state.setText("Отключено")
+            self.dev_file_state.setStyleSheet(
+                "color: #B4B7C2; background: #242731; border-radius: 6px; padding: 4px 8px;"
+            )
 
     def choose_directory(self, line_edit: QLineEdit) -> None:
         selected = QFileDialog.getExistingDirectory(self, "Выберите каталог", line_edit.text())
@@ -1870,6 +1996,7 @@ class HostsApp(QMainWindow):
         self.origins: Origins = {}
         self._applied_hosts_snapshot: HostsSnapshot = ()
         self._collapsed_group_ids: set[str] = set()
+        self._group_status_labels: dict[str, QLabel] = {}
         self._refreshing = False
 
         self.load_initial_data()
@@ -1932,6 +2059,10 @@ class HostsApp(QMainWindow):
         settings_button.setToolTip("Открыть настройки (Ctrl+,)")
         settings_button.clicked.connect(self.manage_settings)
         header.addWidget(settings_button)
+        help_button = QPushButton("Справка")
+        help_button.setToolTip("Открыть встроенную справку (F1)")
+        help_button.clicked.connect(self.show_help)
+        header.addWidget(help_button)
         root.addLayout(header)
 
         file_card = QFrame()
@@ -2025,7 +2156,7 @@ class HostsApp(QMainWindow):
         context_layout.addWidget(self.delete_button)
         root.addWidget(context_bar)
 
-        self.table = QTableWidget(0, 5)
+        self.table = RoundedTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(["Включено", "Домен", "Активный IP", "Происхождение", "Всего IP"])
         self.table.setAccessibleName("Записи hosts по группам")
         self.table.setAccessibleDescription(
@@ -2098,6 +2229,7 @@ class HostsApp(QMainWindow):
         register("Ctrl+P", self.preview_hosts)
         register("Ctrl+S", self.save_managed_block)
         register("Ctrl+,", self.manage_settings)
+        register("F1", self.show_help)
         register("F5", self.reload)
         register(
             "Delete",
@@ -2115,6 +2247,9 @@ class HostsApp(QMainWindow):
     def focus_search(self) -> None:
         self.search_edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
         self.search_edit.selectAll()
+
+    def show_help(self) -> None:
+        HelpDialog(self).exec()
 
     def refresh_filter_options(self) -> None:
         def replace_options(
@@ -2145,6 +2280,7 @@ class HostsApp(QMainWindow):
         self.refresh_filter_options()
         blocker = QSignalBlocker(self.table)
         self.table.setRowCount(0)
+        self._group_status_labels.clear()
         query = self.search_edit.text()
         state_filter = str(self.state_filter.currentData() or "")
         group_filter = str(self.group_filter.currentData() or "")
@@ -2188,7 +2324,7 @@ class HostsApp(QMainWindow):
             collapse.setAccessibleName(f"{collapse.toolTip()} {group.name}")
             collapse.clicked.connect(lambda _checked=False, group_id=group.id: self.toggle_group_collapsed(group_id))
             group_layout.addWidget(collapse)
-            group_check = QCheckBox()
+            group_check = VisibleCheckBox()
             group_check.setChecked(group.enabled)
             group_check.setToolTip("Включить или исключить группу из hosts, не меняя отдельные записи")
             group_check.setAccessibleName(f"Включить группу {group.name} в hosts")
@@ -2202,6 +2338,11 @@ class HostsApp(QMainWindow):
             count_label = QLabel(count_text)
             count_label.setObjectName("hint")
             group_layout.addWidget(count_label)
+            group_status = QLabel()
+            group_status.setAccessibleName(f"Состояние группы {group.name} в hosts")
+            group_layout.addWidget(group_status)
+            self._group_status_labels[group.id] = group_status
+            self.update_group_status_label(group.id, group.enabled)
             group_layout.addStretch()
             self.table.setCellWidget(header_row, 0, group_cell)
             self.table.setRowHeight(header_row, 40)
@@ -2212,7 +2353,7 @@ class HostsApp(QMainWindow):
                 row = self.table.rowCount()
                 self.table.insertRow(row)
 
-                check = QCheckBox()
+                check = VisibleCheckBox()
                 check.setChecked(entry.enabled)
                 check.setToolTip(f"Включить или отключить запись {domain}")
                 check.setAccessibleName(f"Включить домен {domain} в hosts")
@@ -2253,10 +2394,6 @@ class HostsApp(QMainWindow):
                 count.setFont(monospace_font(HOSTS_TABLE_FONT_SIZE))
                 count.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(row, 4, count)
-                if not group.enabled:
-                    muted = QColor("#777B87")
-                    for item in (domain_item, origin, count):
-                        item.setForeground(muted)
                 if domain == selected_domain:
                     self.table.selectRow(row)
         self.table.scrollToTop()
@@ -2389,10 +2526,25 @@ class HostsApp(QMainWindow):
         group = next((group for group in self.groups if group.id == group_id), None)
         if group is None:
             return
-        group.enabled = state == Qt.CheckState.Checked.value
-        self.persist_internal_state()
+        enabled = state == Qt.CheckState.Checked.value
+        if group.enabled == enabled:
+            return
+        group.enabled = enabled
+        self.persist_hosts_state()
+        self.update_group_status_label(group_id, enabled)
+        self.refresh_hosts_status()
         logger.info("group_toggled", group_id=group_id, enabled=group.enabled)
-        self.refresh_table()
+
+    def update_group_status_label(self, group_id: str, enabled: bool) -> None:
+        label = self._group_status_labels.get(group_id)
+        if label is None:
+            return
+        if enabled:
+            label.setText("В hosts")
+            label.setStyleSheet("color: #8FD6A8; background: transparent; font-weight: 600;")
+        else:
+            label.setText("Исключена из hosts")
+            label.setStyleSheet("color: #F0C674; background: transparent; font-weight: 600;")
 
     def set_selected_ip(self, domain: str, ip: str) -> None:
         if not self._refreshing and domain in self.entries and ip in self.entries[domain].ips:
@@ -2690,6 +2842,10 @@ class HostsApp(QMainWindow):
             self.sources,
             self.origins,
         )
+
+    def persist_hosts_state(self) -> None:
+        """Persist entries and groups without rewriting unrelated URL-source metadata."""
+        save_state(self.entries, self.groups)
 
     def manage_sources(self) -> None:
         previous_sources = {source.id: source for source in self.sources}

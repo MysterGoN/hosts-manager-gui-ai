@@ -120,6 +120,7 @@ Primary keyboard shortcuts:
 - `Ctrl+P` — open Preview;
 - `Ctrl+S` — review and save to `hosts`;
 - `Ctrl+,` — open Settings;
+- `F1` — open the built-in Help;
 - `F5` — reload data from disk;
 - `Delete` and `Escape` in the table — delete selected records or clear selection;
 - `F7` / `Shift+F7` in the diff — navigate to the next or previous change.
@@ -128,6 +129,10 @@ Interactive controls have a prominent keyboard focus outline. State is not
 represented by color alone: the diff uses `+`, `−`, `≈`, and `•` markers, while
 checkboxes retain their native check mark. Compound table controls have
 contextual accessible names for screen readers.
+
+The main window's Help button explains the local state/`hosts` model, groups,
+imports, URL sources, and the complete shortcut list. Help is bundled with the
+application and works offline.
 
 Run `make check-ui-scaling` to verify the main window and dialogs at 100%, 125%,
 150%, and 200% scaling. The same check runs in the GitHub Actions build matrix on

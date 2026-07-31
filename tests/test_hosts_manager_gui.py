@@ -899,6 +899,41 @@ def test_bulk_toggle_updates_selected_entries_and_saves_once() -> None:
     assert app.refresh_calls == 1
 
 
+def test_group_toggle_updates_once_without_rebuilding_large_table() -> None:
+    class GroupApp:
+        _refreshing = False
+        groups = [hmg.HostGroup("work", "Work")]
+        entries = {
+            f"host-{index}.test": hmg.HostEntry(f"host-{index}.test", ["127.0.0.1"], group_id="work")
+            for index in range(200)
+        }
+        persist_calls = 0
+        status_calls: list[tuple[str, bool]] = []
+        hosts_status_calls = 0
+
+        def persist_hosts_state(self) -> None:
+            self.persist_calls += 1
+
+        def update_group_status_label(self, group_id: str, enabled: bool) -> None:
+            self.status_calls.append((group_id, enabled))
+
+        def refresh_hosts_status(self) -> None:
+            self.hosts_status_calls += 1
+
+        @staticmethod
+        def refresh_table() -> None:
+            raise AssertionError("group toggle must not rebuild the table")
+
+    app = GroupApp()
+
+    HostsApp.set_group_enabled(app, "work", Qt.CheckState.Unchecked.value)  # type: ignore[arg-type]
+
+    assert not app.groups[0].enabled
+    assert app.persist_calls == 1
+    assert app.status_calls == [("work", False)]
+    assert app.hosts_status_calls == 1
+
+
 def test_canceling_sources_dialog_does_not_apply_its_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

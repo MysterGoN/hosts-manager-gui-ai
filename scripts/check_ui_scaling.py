@@ -33,6 +33,7 @@ def check_scale(scale: str) -> int:
         APP_STYLE,
         EntryDialog,
         GroupsDialog,
+        HelpDialog,
         HostsApp,
         HostsDiffPreview,
         ImportDialog,
@@ -79,6 +80,7 @@ def check_scale(scale: str) -> int:
     main_window = SmokeHostsApp()
     dialogs: list[QWidget] = [
         main_window,
+        HelpDialog(parent),
         EntryDialog(parent),
         ImportDialog(parent),
         SourceEditDialog(parent),
@@ -95,7 +97,18 @@ def check_scale(scale: str) -> int:
         shortcut.key().toString(QKeySequence.SequenceFormat.PortableText)
         for shortcut in main_window.findChildren(QShortcut)
     }
-    required_shortcuts = {"Ctrl+N", "Ctrl+I", "Ctrl+F", "Ctrl+P", "Ctrl+S", "Ctrl+,", "F5", "Del", "Esc"}
+    required_shortcuts = {
+        "Ctrl+N",
+        "Ctrl+I",
+        "Ctrl+F",
+        "Ctrl+P",
+        "Ctrl+S",
+        "Ctrl+,",
+        "F1",
+        "F5",
+        "Del",
+        "Esc",
+    }
     if missing_shortcuts := required_shortcuts - shortcuts:
         failures.append(f"HostsApp: missing shortcuts {sorted(missing_shortcuts)}")
     for dialog in dialogs:
