@@ -43,6 +43,27 @@ jobs:
         with:
           enable-cache: true
 
+      - name: Validate shell installers
+        if: runner.os != 'Windows'
+        run: bash -n packaging/installers/*.sh
+
+      - name: Validate PowerShell installers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem packaging/installers/*.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName,
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -gt 0) {
+              throw ($errors | Out-String)
+            }
+          }
+
       - name: Install Python
         run: uv python install 3.14
 
@@ -80,6 +101,9 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
       - name: Download built applications
         uses: actions/download-artifact@v8
         with:
@@ -98,8 +122,14 @@ jobs:
             -C dist/artifacts/hosts-manager-gui-macos hosts-manager-gui
           zip -j dist/release/hosts-manager-gui-windows.zip \
             dist/artifacts/hosts-manager-gui-windows/hosts-manager-gui.exe
+          install -m 755 packaging/installers/install-linux.sh dist/release/install-linux.sh
+          install -m 755 packaging/installers/uninstall-linux.sh dist/release/uninstall-linux.sh
+          install -m 755 packaging/installers/install-macos.sh dist/release/install-macos.sh
+          install -m 755 packaging/installers/uninstall-macos.sh dist/release/uninstall-macos.sh
+          install -m 644 packaging/installers/install-windows.ps1 dist/release/install-windows.ps1
+          install -m 644 packaging/installers/uninstall-windows.ps1 dist/release/uninstall-windows.ps1
           cd dist/release
-          sha256sum hosts-manager-gui-* > SHA256SUMS
+          sha256sum hosts-manager-gui-* install-* uninstall-* > SHA256SUMS
 
       - name: Create GitHub Release
         env:

@@ -11,7 +11,82 @@
 Desktop-приложение для управления отдельным HMG-блоком в системном файле `hosts`.
 Интерфейс построен на PySide6/Qt и использует тёмную QSS-тему.
 
-## Запуск
+## Установка готовой сборки
+
+Готовые сборки не требуют Python, `uv` или зависимостей проекта. Установочные
+скрипты из [последнего GitHub Release](https://github.com/MysterGoN/hosts-manager-gui/releases/latest)
+сами скачивают нужный архив, проверяют его по `SHA256SUMS`, устанавливают
+приложение, создают ярлык и запускают его. Перед запуском скрипт можно открыть
+в текстовом редакторе и проверить.
+
+### Linux x86_64
+
+Требуется `glibc 2.39` или новее. Выполните:
+
+```bash
+curl -fLO https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download/install-linux.sh
+bash install-linux.sh
+```
+
+Приложение устанавливается в `~/.local/bin` и появляется в меню приложений.
+Для записи `/etc/hosts` требуется `pkexec` из PolicyKit.
+
+Удаление:
+
+```bash
+curl -fLO https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download/uninstall-linux.sh
+bash uninstall-linux.sh
+```
+
+### Windows x86_64
+
+Откройте PowerShell и выполните:
+
+```powershell
+$url = "https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download"
+Invoke-WebRequest "$url/install-windows.ps1" -OutFile .\install-windows.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1
+```
+
+Приложение устанавливается в пользовательский каталог программ и добавляется
+в меню «Пуск». SmartScreen может потребовать выбрать «Подробнее» → «Выполнить
+в любом случае» при первом запуске неподписанного файла. Windows покажет
+стандартный запрос UAC только при записи системного `hosts`.
+
+Удаление:
+
+```powershell
+$url = "https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download"
+Invoke-WebRequest "$url/uninstall-windows.ps1" -OutFile .\uninstall-windows.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\uninstall-windows.ps1
+```
+
+### macOS Apple Silicon
+
+Для Mac с процессором Apple Silicon (`arm64`) выполните в Terminal:
+
+```bash
+curl -fLO https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download/install-macos.sh
+bash install-macos.sh
+```
+
+Скрипт создаёт `~/Applications/Hosts Manager GUI.app`. При первом запуске
+неподписанного приложения Gatekeeper может потребовать разрешить его через
+«Системные настройки» → «Конфиденциальность и безопасность» → «Всё равно открыть».
+
+Удаление:
+
+```bash
+curl -fLO https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download/uninstall-macos.sh
+bash uninstall-macos.sh
+```
+
+Для обновления достаточно закрыть приложение и повторно запустить установочный
+скрипт. Скрипты удаления убирают приложение и ярлыки, но намеренно сохраняют
+настройки, local state, логи, резервные копии и изменения системного `hosts`.
+Их можно удалить отдельно после проверки путей в окне «Настройки».
+
+## Запуск из исходного кода
 
 Требуется Python 3.11+ и [uv](https://docs.astral.sh/uv/).
 
@@ -189,9 +264,9 @@ git push --follow-tags
 тег `vX.Y.Z`. Команда ничего не отправляет в удалённый репозиторий; явный push
 тега запускает build-матрицу GitHub Actions. После успешной сборки на всех трёх
 платформах workflow создаёт GitHub Release с автоматически сформированными notes
-и прикрепляет `hosts-manager-gui-linux.tar.gz`, `hosts-manager-gui-windows.zip`,
-`hosts-manager-gui-macos.tar.gz` и файл контрольных сумм `SHA256SUMS`. Ручной
-запуск workflow создаёт только Actions artifacts и не публикует Release без тега.
+и прикрепляет архивы приложений, установочные скрипты, скрипты удаления и файл
+контрольных сумм `SHA256SUMS`. Ручной запуск workflow создаёт только Actions
+artifacts и не публикует Release без тега.
 
 ## Сборка приложения
 

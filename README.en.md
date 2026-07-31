@@ -11,7 +11,82 @@ English | [Русский](README.md)
 A desktop application for managing a dedicated HMG block in the system `hosts`
 file. The interface is built with PySide6/Qt and uses a dark QSS theme.
 
-## Running the application
+## Installing a release
+
+Release builds do not require Python, `uv`, or the project dependencies. The
+installer scripts from the [latest GitHub Release](https://github.com/MysterGoN/hosts-manager-gui/releases/latest)
+download the correct archive, verify it against `SHA256SUMS`, install the
+application, create a shortcut, and launch it. You can inspect each script in a
+text editor before running it.
+
+### Linux x86_64
+
+`glibc 2.39` or newer is required. Run:
+
+```bash
+curl -fLO https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download/install-linux.sh
+bash install-linux.sh
+```
+
+The application is installed in `~/.local/bin` and added to the application
+menu. Writing `/etc/hosts` requires `pkexec` from PolicyKit.
+
+To uninstall:
+
+```bash
+curl -fLO https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download/uninstall-linux.sh
+bash uninstall-linux.sh
+```
+
+### Windows x86_64
+
+Open PowerShell and run:
+
+```powershell
+$url = "https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download"
+Invoke-WebRequest "$url/install-windows.ps1" -OutFile .\install-windows.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1
+```
+
+The application is installed in the per-user programs directory and added to
+the Start menu. SmartScreen may require More info → Run anyway on the first
+launch of the unsigned file. Windows displays the standard UAC prompt only when
+the application writes the system `hosts` file.
+
+To uninstall:
+
+```powershell
+$url = "https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download"
+Invoke-WebRequest "$url/uninstall-windows.ps1" -OutFile .\uninstall-windows.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\uninstall-windows.ps1
+```
+
+### macOS Apple Silicon
+
+On a Mac with Apple Silicon (`arm64`), run the following in Terminal:
+
+```bash
+curl -fLO https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download/install-macos.sh
+bash install-macos.sh
+```
+
+The script creates `~/Applications/Hosts Manager GUI.app`. Gatekeeper may block
+the first launch of the unsigned application. If it does, use System Settings →
+Privacy & Security → Open Anyway.
+
+To uninstall:
+
+```bash
+curl -fLO https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download/uninstall-macos.sh
+bash uninstall-macos.sh
+```
+
+To update, close the application and run the installer again. Uninstallers
+remove the application and shortcuts but intentionally preserve settings, local
+state, logs, backups, and changes to the system `hosts` file. Remove those
+separately if needed after checking the paths shown in Settings.
+
+## Running from source
 
 Python 3.11+ and [uv](https://docs.astral.sh/uv/) are required.
 
@@ -190,10 +265,9 @@ git push --follow-tags
 an annotated `vX.Y.Z` tag. It does not push anything to the remote repository;
 explicitly pushing the tag triggers the GitHub Actions build matrix. After all
 three platform builds succeed, the workflow creates a GitHub Release with
-automatically generated notes and attaches `hosts-manager-gui-linux.tar.gz`,
-`hosts-manager-gui-windows.zip`, `hosts-manager-gui-macos.tar.gz`, and the
-`SHA256SUMS` checksum file. A manual workflow run creates Actions artifacts only
-and does not publish a Release without a tag.
+automatically generated notes and attaches application archives, installers,
+uninstallers, and the `SHA256SUMS` checksum file. A manual workflow run creates
+Actions artifacts only and does not publish a Release without a tag.
 
 ## Building the application
 
