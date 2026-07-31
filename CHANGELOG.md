@@ -1,3 +1,9 @@
+## v0.4.1 (2026-07-31)
+
+### Fix
+
+- make updater tests platform independent
+
 ## v0.4.0 (2026-07-31)
 
 ### Feat
