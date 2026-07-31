@@ -100,6 +100,16 @@ shows how many domains are saved in local state but not yet applied to the syste
 `hosts` file. Full domain and origin values are available through tooltips and
 context-menu copying.
 
+The `hosts` preview identifies added, removed, modified, and service lines
+separately. `Generated at` changes are excluded from user-facing statistics.
+Long unchanged sections are collapsed, while Previous and Next buttons navigate
+between changes.
+
+Successful non-critical operations appear in the main window's status message
+instead of requiring a modal dialog to be dismissed. Dangerous confirmations
+use explicit actions such as Delete records or Close without applying rather
+than ambiguous Yes/No buttons.
+
 ## Checks
 
 ```bash

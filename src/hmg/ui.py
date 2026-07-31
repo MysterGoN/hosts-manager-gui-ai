@@ -5,6 +5,7 @@ import re
 import shutil
 import signal
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QModelIndex, QPoint, QSignalBlocker, Qt, QTimer, QUrl, Signal
@@ -58,6 +59,7 @@ from PySide6.QtWidgets import (
 from hmg.core import (
     APP_NAME,
     DEFAULT_GROUP_ID,
+    GENERATED_AT_PREFIX,
     ElevatedWriteError,
     EntryDiff,
     HostEntry,
@@ -117,6 +119,26 @@ DiffStats = dict[str, int]
 EntriesSnapshot = tuple[tuple[str, tuple[str, ...], str, bool], ...]
 HostsSnapshot = tuple[tuple[str, str], ...]
 
+
+@dataclass(frozen=True)
+class DisplayedDiffRow:
+    before_line: str = ""
+    after_line: str = ""
+    before_tag: str | None = None
+    after_tag: str | None = None
+    before_number: int | None = None
+    after_number: int | None = None
+    hidden_count: int = 0
+
+    @property
+    def is_collapsed(self) -> bool:
+        return self.hidden_count > 0
+
+    @property
+    def is_user_change(self) -> bool:
+        return self.before_tag in {"removed", "changed"} or self.after_tag in {"added", "changed"}
+
+
 SIZE_UNITS = {"KB": 1024, "MB": 1024**2, "GB": 1024**3}
 RETENTION_UNITS = {"min": 60, "h": 60 * 60, "d": 24 * 60 * 60}
 MAX_LOG_SIZE_BYTES = 1024**4
@@ -126,6 +148,7 @@ DIFF_COLORS = {
     "added": "#234D37",
     "removed": "#573338",
     "changed": "#554A25",
+    "service": "#252832",
 }
 HOSTS_TABLE_FONT_SIZE = 13
 
@@ -510,6 +533,30 @@ def dialog_buttons(parent: QDialog, confirm_text: str) -> QDialogButtonBox:
     return buttons
 
 
+def confirm_action(
+    parent: QWidget,
+    title: str,
+    text: str,
+    confirm_text: str,
+    *,
+    cancel_text: str = "Отмена",
+    warning: bool = False,
+    destructive: bool = False,
+) -> bool:
+    dialog = QMessageBox(parent)
+    dialog.setWindowTitle(title)
+    dialog.setText(text)
+    dialog.setIcon(QMessageBox.Icon.Warning if warning else QMessageBox.Icon.Question)
+    cancel_button = dialog.addButton(cancel_text, QMessageBox.ButtonRole.RejectRole)
+    confirm_button = dialog.addButton(confirm_text, QMessageBox.ButtonRole.AcceptRole)
+    if destructive:
+        confirm_button.setObjectName("danger")
+    dialog.setDefaultButton(cancel_button)
+    dialog.setEscapeButton(cancel_button)
+    dialog.exec()
+    return dialog.clickedButton() is confirm_button
+
+
 class ChangePreview(QDialog):
     def __init__(self, parent: QWidget, title: str, diff: EntryDiff, confirm_text: str = "Применить") -> None:
         super().__init__(parent)
@@ -560,6 +607,9 @@ class HostsDiffPreview(QDialog):
         self.setWindowTitle("Предпросмотр изменений hosts")
         self.resize(1180, 760)
         self.diff_rows = build_side_by_side_diff(before, after)
+        self.display_rows = collapse_unchanged_diff_rows(self.diff_rows)
+        self.change_row_indices = [index for index, row in enumerate(self.display_rows) if row.is_user_change]
+        self.current_change_index = -1
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
@@ -569,6 +619,22 @@ class HostsDiffPreview(QDialog):
         status = QLabel(format_diff_status(summarize_diff_rows(self.diff_rows)))
         status.setObjectName("subtitle")
         layout.addWidget(status)
+        legend = QLabel("＋ Добавлено   − Удалено   ≈ Изменено   • Generated at — служебное изменение")
+        legend.setObjectName("hint")
+        layout.addWidget(legend)
+
+        navigation = QHBoxLayout()
+        self.previous_change_button = QPushButton("← Предыдущее")
+        self.previous_change_button.clicked.connect(lambda: self.navigate_change(-1))
+        navigation.addWidget(self.previous_change_button)
+        self.next_change_button = QPushButton("Следующее →")
+        self.next_change_button.clicked.connect(lambda: self.navigate_change(1))
+        navigation.addWidget(self.next_change_button)
+        self.change_position = QLabel()
+        self.change_position.setObjectName("subtitle")
+        navigation.addWidget(self.change_position)
+        navigation.addStretch()
+        layout.addLayout(navigation)
 
         panes = QWidget()
         panes_layout = QHBoxLayout(panes)
@@ -589,6 +655,14 @@ class HostsDiffPreview(QDialog):
         self.after_text.verticalScrollBar().valueChanged.connect(self.before_text.verticalScrollBar().setValue)
         self.before_text.horizontalScrollBar().valueChanged.connect(self.after_text.horizontalScrollBar().setValue)
         self.after_text.horizontalScrollBar().valueChanged.connect(self.before_text.horizontalScrollBar().setValue)
+        has_changes = bool(self.change_row_indices)
+        self.previous_change_button.setEnabled(has_changes)
+        self.next_change_button.setEnabled(has_changes)
+        self.change_position.setText(
+            f"Изменений: {len(self.change_row_indices)}" if has_changes else "Пользовательских изменений нет"
+        )
+        if has_changes:
+            QTimer.singleShot(0, lambda: self.navigate_change(1))
 
         buttons = QDialogButtonBox()
         close = buttons.addButton("Закрыть", QDialogButtonBox.ButtonRole.RejectRole)
@@ -616,15 +690,15 @@ class HostsDiffPreview(QDialog):
         return panel, editor
 
     def _insert_diff(self) -> None:
-        self.before_text.setPlainText("\n".join(format_numbered_diff_side(self.diff_rows, side="before")))
-        self.after_text.setPlainText("\n".join(format_numbered_diff_side(self.diff_rows, side="after")))
-        self.before_text.setExtraSelections(self._diff_selections(self.before_text, 2))
-        self.after_text.setExtraSelections(self._diff_selections(self.after_text, 3))
+        self.before_text.setPlainText("\n".join(format_displayed_diff_side(self.display_rows, side="before")))
+        self.after_text.setPlainText("\n".join(format_displayed_diff_side(self.display_rows, side="after")))
+        self.before_text.setExtraSelections(self._diff_selections(self.before_text, side="before"))
+        self.after_text.setExtraSelections(self._diff_selections(self.after_text, side="after"))
 
-    def _diff_selections(self, editor: QPlainTextEdit, tag_index: int) -> list[QTextEdit.ExtraSelection]:
+    def _diff_selections(self, editor: QPlainTextEdit, side: str) -> list[QTextEdit.ExtraSelection]:
         selections: list[QTextEdit.ExtraSelection] = []
-        for line_number, row in enumerate(self.diff_rows):
-            tag = row[tag_index]
+        for line_number, row in enumerate(self.display_rows):
+            tag = row.before_tag if side == "before" else row.after_tag
             if not tag:
                 continue
             selection = QTextEdit.ExtraSelection()
@@ -635,6 +709,17 @@ class HostsDiffPreview(QDialog):
             selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
             selections.append(selection)
         return selections
+
+    def navigate_change(self, offset: int) -> None:
+        if not self.change_row_indices:
+            return
+        self.current_change_index = (self.current_change_index + offset) % len(self.change_row_indices)
+        display_line = self.change_row_indices[self.current_change_index]
+        for editor in (self.before_text, self.after_text):
+            cursor = QTextCursor(editor.document().findBlockByLineNumber(display_line))
+            editor.setTextCursor(cursor)
+            editor.centerCursor()
+        self.change_position.setText(f"Изменение {self.current_change_index + 1} из {len(self.change_row_indices)}")
 
 
 def build_side_by_side_diff(before: str, after: str) -> list[DiffRow]:
@@ -652,8 +737,120 @@ def build_side_by_side_diff(before: str, after: str) -> list[DiffRow]:
         elif tag == "insert":
             rows.extend(align_diff_lines(["" for _line in right], right, after_tag="added"))
         elif tag == "replace":
-            rows.extend(align_diff_lines(left, right, before_tag="changed", after_tag="changed"))
-    return rows
+            paired_count = min(len(left), len(right))
+            rows.extend(
+                align_diff_lines(
+                    left[:paired_count],
+                    right[:paired_count],
+                    before_tag="changed",
+                    after_tag="changed",
+                )
+            )
+            rows.extend(
+                align_diff_lines(
+                    left[paired_count:],
+                    ["" for _line in left[paired_count:]],
+                    before_tag="removed",
+                )
+            )
+            rows.extend(
+                align_diff_lines(
+                    ["" for _line in right[paired_count:]],
+                    right[paired_count:],
+                    after_tag="added",
+                )
+            )
+    return [classify_service_diff_row(row) for row in rows]
+
+
+def classify_service_diff_row(row: DiffRow) -> DiffRow:
+    before_line, after_line, before_tag, after_tag = row
+    before_generated = before_line.strip().startswith(GENERATED_AT_PREFIX)
+    after_generated = after_line.strip().startswith(GENERATED_AT_PREFIX)
+    if not (
+        (before_generated and after_generated)
+        or (before_generated and not after_line)
+        or (after_generated and not before_line)
+    ):
+        return row
+    return (
+        before_line,
+        after_line,
+        "service" if before_line else None,
+        "service" if after_line else None,
+    )
+
+
+def collapse_unchanged_diff_rows(
+    rows: list[DiffRow],
+    *,
+    context: int = 3,
+    collapse_threshold: int = 8,
+) -> list[DisplayedDiffRow]:
+    if context < 0 or collapse_threshold < 1:
+        raise ValueError("Diff context and collapse threshold must be positive")
+
+    annotated: list[DisplayedDiffRow] = []
+    before_number = 0
+    after_number = 0
+    for row in rows:
+        before_line, after_line, before_tag, after_tag = row
+        before_placeholder = not before_line and bool(after_line) and after_tag is not None
+        after_placeholder = not after_line and bool(before_line) and before_tag is not None
+        if not before_placeholder:
+            before_number += 1
+        if not after_placeholder:
+            after_number += 1
+        annotated.append(
+            DisplayedDiffRow(
+                before_line=before_line,
+                after_line=after_line,
+                before_tag=before_tag,
+                after_tag=after_tag,
+                before_number=None if before_placeholder else before_number,
+                after_number=None if after_placeholder else after_number,
+            )
+        )
+
+    anchors = [index for index, row in enumerate(annotated) if row.before_tag is not None or row.after_tag is not None]
+    visible: set[int] = set()
+    if anchors:
+        for index in anchors:
+            visible.update(range(max(0, index - context), min(len(rows), index + context + 1)))
+    else:
+        visible.update(range(min(context, len(rows))))
+        visible.update(range(max(0, len(rows) - context), len(rows)))
+
+    result: list[DisplayedDiffRow] = []
+    index = 0
+    while index < len(annotated):
+        if index in visible:
+            result.append(annotated[index])
+            index += 1
+            continue
+        gap_start = index
+        while index < len(annotated) and index not in visible:
+            index += 1
+        hidden = annotated[gap_start:index]
+        if len(hidden) < collapse_threshold:
+            result.extend(hidden)
+        else:
+            result.append(DisplayedDiffRow(hidden_count=len(hidden)))
+    return result
+
+
+def format_displayed_diff_side(rows: list[DisplayedDiffRow], side: str) -> list[str]:
+    if side not in {"before", "after"}:
+        raise ValueError(f"Unknown diff side: {side}")
+    result: list[str] = []
+    for row in rows:
+        if row.is_collapsed:
+            result.append(f"      ⋯ {row.hidden_count} неизменённых строк ⋯")
+            continue
+        line = row.before_line if side == "before" else row.after_line
+        number = row.before_number if side == "before" else row.after_number
+        result.append("      " if number is None else f"{number:>4}  {line}")
+    return result
 
 
 def format_numbered_diff_side(rows: list[DiffRow], side: str) -> list[str]:
@@ -707,7 +904,7 @@ def summarize_diff_rows(rows: list[DiffRow]) -> DiffStats:
 def format_diff_status(stats: DiffStats) -> str:
     if not any(stats.values()):
         return "Изменений нет"
-    return f"Добавлено строк: {stats['added']}  Удалено строк: {stats['removed']}  Изменено строк: {stats['changed']}"
+    return f"Добавлено: {stats['added']} · Удалено: {stats['removed']} · Изменено: {stats['changed']}"
 
 
 class EntryDialog(QDialog):
@@ -1101,12 +1298,13 @@ class SourcesDialog(QDialog):
         source = self.selected_source()
         if source is None:
             return
-        answer = QMessageBox.question(
+        if confirm_action(
             self,
             APP_NAME,
             f"Удалить источник «{source.name}»?\nЕго уникальные связи будут удалены.",
-        )
-        if answer == QMessageBox.StandardButton.Yes:
+            "Удалить источник",
+            destructive=True,
+        ):
             self.sources = [item for item in self.sources if item.id != source.id]
             self.refresh_table()
 
@@ -1445,12 +1643,13 @@ class GroupsDialog(QDialog):
             QMessageBox.information(self, APP_NAME, "Группу Default нельзя удалить")
             return
         count = self.entry_counts.get(group.id, 0)
-        answer = QMessageBox.question(
+        if not confirm_action(
             self,
             APP_NAME,
             f"Удалить группу «{group.name}»?\nЗаписи ({count}) будут перенесены в Default.",
-        )
-        if answer != QMessageBox.StandardButton.Yes:
+            "Удалить группу",
+            destructive=True,
+        ):
             return
         self.groups = [item for item in self.groups if item.id != group.id]
         self.entry_counts[DEFAULT_GROUP_ID] = self.entry_counts.get(DEFAULT_GROUP_ID, 0) + count
@@ -1813,6 +2012,14 @@ class HostsApp(QMainWindow):
         self.table.customContextMenuRequested.connect(self.show_table_context_menu)
         root.addWidget(self.table, 1)
 
+        self.feedback_status = QLabel()
+        self.feedback_status.setWordWrap(True)
+        self.feedback_status.hide()
+        root.addWidget(self.feedback_status)
+        self.feedback_timer = QTimer(self)
+        self.feedback_timer.setSingleShot(True)
+        self.feedback_timer.timeout.connect(self.feedback_status.hide)
+
         footer = QHBoxLayout()
         self.hosts_status = QLabel()
         self.hosts_status.setToolTip("Локальное состояние сохраняется автоматически")
@@ -2034,6 +2241,29 @@ class HostsApp(QMainWindow):
                 "color: #8FD6A8; background: #1D3025; border-radius: 7px; padding: 6px 10px;"
             )
 
+    def show_feedback(
+        self,
+        message: str,
+        *,
+        kind: str = "success",
+        details: str | None = None,
+        duration_ms: int = 6000,
+    ) -> None:
+        colors = {
+            "success": ("#8FD6A8", "#1D3025", "#345C43"),
+            "info": ("#B8C7FF", "#202A45", "#3B4D7A"),
+            "warning": ("#F0C674", "#302A1D", "#66552D"),
+        }
+        foreground, background, border = colors.get(kind, colors["info"])
+        self.feedback_status.setText(message)
+        self.feedback_status.setToolTip(details or message)
+        self.feedback_status.setStyleSheet(
+            f"color: {foreground}; background: {background}; border: 1px solid {border}; "
+            "border-radius: 8px; padding: 10px 12px;"
+        )
+        self.feedback_status.show()
+        self.feedback_timer.start(duration_ms)
+
     def show_table_context_menu(self, position: QPoint) -> None:
         index = self.table.indexAt(position)
         if not index.isValid():
@@ -2152,6 +2382,7 @@ class HostsApp(QMainWindow):
         self.load_initial_data()
         self.refresh_table()
         logger.info("data_reloaded_from_disk")
+        self.show_feedback("Данные перечитаны с диска", kind="info")
 
     def add_entry(self) -> None:
         dialog = EntryDialog(self)
@@ -2160,10 +2391,9 @@ class HostsApp(QMainWindow):
         entry = dialog.result_entry
         if entry.domain in self.entries:
             added = self.entries[entry.domain].add_ips(entry.ips)
-            QMessageBox.information(
-                self,
-                APP_NAME,
-                f"Домен уже существует. Добавленные IP: {', '.join(added) if added else 'нет'}",
+            self.show_feedback(
+                f"Домен уже существует · добавленные IP: {', '.join(added) if added else 'нет'}",
+                kind="info",
             )
         else:
             self.entries[entry.domain] = entry
@@ -2208,8 +2438,7 @@ class HostsApp(QMainWindow):
             if remainder > 0:
                 visible_domains += f"\n• …и ещё {remainder}"
             question = f"Удалить выбранные записи ({len(domains)})?\n\n{visible_domains}"
-        answer = QMessageBox.question(self, APP_NAME, question)
-        if answer == QMessageBox.StandardButton.Yes:
+        if confirm_action(self, APP_NAME, question, "Удалить записи", destructive=True):
             removed = delete_entries_from_internal_state(
                 self.entries,
                 self.origins,
@@ -2253,10 +2482,8 @@ class HostsApp(QMainWindow):
                     mark_domain_manual(self.origins, self.entries[domain])
             self.refresh_table()
             self.persist_internal_state()
-            QMessageBox.information(
-                self,
-                APP_NAME,
-                "Импорт применён. Нажмите «Сохранить в hosts», чтобы записать изменения.",
+            self.show_feedback(
+                "Импорт применён к local state · файл hosts пока не изменён",
             )
 
     def build_preview_texts(self) -> tuple[str, str]:
@@ -2300,16 +2527,19 @@ class HostsApp(QMainWindow):
         self._applied_hosts_snapshot = hosts_snapshot(self.entries, self.groups)
         self.refresh_hosts_status()
         logger.info("hosts_saved", hosts_file=str(self.hosts_file), backup=str(backup))
-        QMessageBox.information(self, APP_NAME, f"Hosts сохранён.\nРезервная копия:\n{backup}")
+        self.show_feedback(
+            f"Hosts сохранён · резервная копия: {backup}",
+            duration_ms=9000,
+        )
 
     def write_content_elevated(self, content: str) -> Path:
-        answer = QMessageBox.warning(
+        if not confirm_action(
             self,
             APP_NAME,
             "Для записи нужны права администратора.\n\nЗапросить права и продолжить?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if answer != QMessageBox.StandardButton.Yes:
+            "Запросить права",
+            warning=True,
+        ):
             raise PermissionError("Пользователь отменил запрос прав администратора")
         try:
             return write_hosts_elevated(self.hosts_file, content)
@@ -2330,14 +2560,14 @@ class HostsApp(QMainWindow):
         updated = dialog.result_settings
 
         if updated.data_path != current.data_path:
-            answer = QMessageBox.question(
+            copy_existing = confirm_action(
                 self,
                 APP_NAME,
                 "Скопировать текущие файлы данных в новый каталог?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes,
+                "Скопировать данные",
+                cancel_text="Не копировать",
             )
-            if answer == QMessageBox.StandardButton.Yes:
+            if copy_existing:
                 try:
                     self.copy_data_files(current.data_path, updated.data_path)
                 except OSError as exc:
@@ -2354,7 +2584,9 @@ class HostsApp(QMainWindow):
             return
         logger.info("settings_updated", data_dir=updated.data_dir, log_dir=updated.log_dir)
         destination = str(log_path) if log_path else "stderr"
-        QMessageBox.information(self, APP_NAME, f"Настройки сохранены.\nТекущий вывод логов: {destination}")
+        self.show_feedback(
+            f"Настройки сохранены · текущий вывод логов: {destination}",
+        )
 
     @staticmethod
     def copy_data_files(source_dir: Path, destination_dir: Path) -> None:
@@ -2444,10 +2676,9 @@ class HostsApp(QMainWindow):
         progress.close()
         if canceled:
             logger.info("url_sources_fetch_canceled", completed_sources=len(results))
-            QMessageBox.information(
-                self,
-                APP_NAME,
-                "Загрузка отменена. Внутреннее состояние не изменено.",
+            self.show_feedback(
+                "Загрузка отменена · local state не изменён",
+                kind="info",
             )
             return
 
@@ -2490,12 +2721,9 @@ class HostsApp(QMainWindow):
             failed_sources=len(results) - successful_count,
             entries_count=len(self.entries),
         )
-        QMessageBox.information(
-            self,
-            APP_NAME,
-            "Внутреннее состояние обновлено. Файл hosts не изменён.\n\n"
-            "Используйте «Предпросмотр», чтобы проверить diff, и "
-            "«Сохранить в hosts», чтобы применить изменения вручную.",
+        self.show_feedback(
+            "URL-данные применены к local state · проверьте diff перед сохранением в hosts",
+            duration_ms=9000,
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:
@@ -2507,15 +2735,17 @@ class HostsApp(QMainWindow):
             event.accept()
             return
 
-        answer = QMessageBox.warning(
+        close_without_applying = confirm_action(
             self,
             "Есть неприменённые изменения",
             "Все изменения сохранены в local state, но ещё не применены в hosts.\n\n"
             "Закрыть приложение без применения в hosts?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            "Закрыть без применения",
+            cancel_text="Остаться",
+            warning=True,
+            destructive=True,
         )
-        if answer == QMessageBox.StandardButton.Yes:
+        if close_without_applying:
             logger.info("app_closed_with_unapplied_hosts_changes")
             event.accept()
         else:

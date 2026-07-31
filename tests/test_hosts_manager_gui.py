@@ -15,6 +15,7 @@ from hmg.ui import (
     SOURCE_FILTER_MANUAL,
     HostsApp,
     build_side_by_side_diff,
+    collapse_unchanged_diff_rows,
     combine_measurement,
     count_unapplied_hosts_changes,
     delete_entries_by_domain,
@@ -22,6 +23,7 @@ from hmg.ui import (
     entries_snapshot,
     entry_matches_filters,
     format_diff_status,
+    format_displayed_diff_side,
     format_numbered_diff_side,
     has_unapplied_hosts_changes,
     hosts_snapshot,
@@ -400,7 +402,49 @@ def test_side_by_side_diff_status_counts_changed_lines() -> None:
     stats = summarize_diff_rows(rows)
 
     assert stats == {"added": 1, "removed": 0, "changed": 1}
-    assert format_diff_status(stats) == "Добавлено строк: 1  Удалено строк: 0  Изменено строк: 1"
+    assert format_diff_status(stats) == "Добавлено: 1 · Удалено: 0 · Изменено: 1"
+
+
+def test_replace_block_classifies_surplus_lines_as_added_or_removed() -> None:
+    added_rows = build_side_by_side_diff("old\n", "changed\nadded\n")
+    removed_rows = build_side_by_side_diff("old\nremoved\n", "changed\n")
+
+    assert added_rows == [
+        ("old", "changed", "changed", "changed"),
+        ("", "added", None, "added"),
+    ]
+    assert removed_rows == [
+        ("old", "changed", "changed", "changed"),
+        ("removed", "", "removed", None),
+    ]
+
+
+def test_diff_statistics_ignore_generated_at_change() -> None:
+    rows = build_side_by_side_diff(
+        "# Generated at old\n127.0.0.1 localhost\n",
+        "# Generated at new\n127.0.0.1 localhost\n",
+    )
+
+    assert rows[0][2:] == ("service", "service")
+    assert summarize_diff_rows(rows) == {"added": 0, "removed": 0, "changed": 0}
+    assert format_diff_status(summarize_diff_rows(rows)) == "Изменений нет"
+
+
+def test_large_unchanged_diff_sections_are_collapsed_with_real_line_numbers() -> None:
+    before_lines = [f"line {index}" for index in range(1, 31)]
+    after_lines = list(before_lines)
+    after_lines[14] = "changed line"
+    rows = build_side_by_side_diff("\n".join(before_lines), "\n".join(after_lines))
+
+    displayed = collapse_unchanged_diff_rows(rows, context=2, collapse_threshold=5)
+    before = format_displayed_diff_side(displayed, "before")
+    after = format_displayed_diff_side(displayed, "after")
+
+    assert sum(row.is_collapsed for row in displayed) == 2
+    assert any("15  line 15" in line for line in before)
+    assert any("15  changed line" in line for line in after)
+    assert before[0].startswith("      ⋯")
+    assert before[-1].startswith("      ⋯")
 
 
 def test_diff_line_numbers_follow_each_file_and_skip_placeholders() -> None:
