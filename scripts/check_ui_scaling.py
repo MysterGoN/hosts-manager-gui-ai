@@ -42,8 +42,10 @@ def check_scale(scale: str) -> int:
         SourcesDialog,
         SourceSyncDialog,
         SourceSyncPreview,
+        UpdateDialog,
         hosts_snapshot,
     )
+    from hmg.updater import ReleaseInfo
 
     application = QApplication.instance()
     if application is None:
@@ -90,6 +92,19 @@ def check_scale(scale: str) -> int:
         GroupsDialog(parent, [default_group()], entries),
         SettingsDialog(parent, default_settings()),
         HostsDiffPreview(parent, long_before, long_after, "Сохранить в hosts"),
+        UpdateDialog(
+            parent,
+            ReleaseInfo(
+                tag_name="v9.9.9",
+                version=(9, 9, 9),
+                name="v9.9.9",
+                notes="- Улучшено обновление\n- Исправлены ошибки",
+                html_url="https://github.com/MysterGoN/hosts-manager-gui/releases/tag/v9.9.9",
+                assets={},
+            ),
+            "0.3.0",
+            has_unapplied_changes=True,
+        ),
     ]
 
     failures: list[str] = []

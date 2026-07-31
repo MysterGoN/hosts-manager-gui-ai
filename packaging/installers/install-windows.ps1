@@ -2,6 +2,9 @@
 param(
     [string]$ReleaseBaseUrl = "https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download",
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\HostsManagerGUI"),
+    [string]$ArchivePath = "",
+    [string]$ChecksumsPath = "",
+    [int]$WaitForProcessId = 0,
     [switch]$NoLaunch
 )
 
@@ -11,12 +14,22 @@ $temporaryDir = Join-Path ([System.IO.Path]::GetTempPath()) ("hmg-install-" + [g
 
 New-Item -ItemType Directory -Force $temporaryDir | Out-Null
 try {
-    $archivePath = Join-Path $temporaryDir $archiveName
-    $checksumsPath = Join-Path $temporaryDir "SHA256SUMS"
-    Invoke-WebRequest "$ReleaseBaseUrl/$archiveName" -OutFile $archivePath
-    Invoke-WebRequest "$ReleaseBaseUrl/SHA256SUMS" -OutFile $checksumsPath
+    $localArchivePath = Join-Path $temporaryDir $archiveName
+    $localChecksumsPath = Join-Path $temporaryDir "SHA256SUMS"
+    if ($ArchivePath -or $ChecksumsPath) {
+        if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $ChecksumsPath -PathType Leaf)) {
+            throw "Both ArchivePath and ChecksumsPath must reference files."
+        }
+        Copy-Item -LiteralPath $ArchivePath -Destination $localArchivePath
+        Copy-Item -LiteralPath $ChecksumsPath -Destination $localChecksumsPath
+    }
+    else {
+        Invoke-WebRequest "$ReleaseBaseUrl/$archiveName" -OutFile $localArchivePath
+        Invoke-WebRequest "$ReleaseBaseUrl/SHA256SUMS" -OutFile $localChecksumsPath
+    }
 
-    $checksumLine = Get-Content $checksumsPath |
+    $checksumLine = Get-Content $localChecksumsPath |
         Where-Object { $_ -match " $([regex]::Escape($archiveName))$" } |
         Select-Object -First 1
     if (-not $checksumLine) {
@@ -24,16 +37,26 @@ try {
     }
 
     $expectedHash = ($checksumLine -split "\s+")[0]
-    $actualHash = (Get-FileHash $archivePath -Algorithm SHA256).Hash
+    $actualHash = (Get-FileHash $localArchivePath -Algorithm SHA256).Hash
     if ($actualHash -ne $expectedHash) {
         throw "Archive SHA-256 mismatch."
     }
 
     $extractedDir = Join-Path $temporaryDir "extracted"
-    Expand-Archive $archivePath -DestinationPath $extractedDir -Force
+    Expand-Archive $localArchivePath -DestinationPath $extractedDir -Force
     $sourceExecutable = Join-Path $extractedDir "hosts-manager-gui.exe"
     if (-not (Test-Path -LiteralPath $sourceExecutable -PathType Leaf)) {
         throw "The archive does not contain hosts-manager-gui.exe."
+    }
+
+    if ($WaitForProcessId -gt 0 -and $WaitForProcessId -ne $PID) {
+        $waitDeadline = [DateTime]::UtcNow.AddMinutes(2)
+        while (Get-Process -Id $WaitForProcessId -ErrorAction SilentlyContinue) {
+            if ([DateTime]::UtcNow -ge $waitDeadline) {
+                throw "Timed out waiting for the running application to close."
+            }
+            Start-Sleep -Milliseconds 200
+        }
     }
 
     New-Item -ItemType Directory -Force $InstallDir | Out-Null

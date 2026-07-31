@@ -16,7 +16,7 @@ if [[ "${HMG_SKIP_PLATFORM_CHECK:-0}" != "1" ]]; then
     esac
 fi
 
-for command_name in curl grep install mktemp sha256sum tar; do
+for command_name in cp curl grep install mktemp sha256sum sleep tar; do
     command -v "$command_name" >/dev/null 2>&1 || {
         echo "Required command is missing: $command_name" >&2
         exit 1
@@ -26,10 +26,21 @@ done
 temporary_dir="$(mktemp -d)"
 trap 'rm -rf -- "$temporary_dir"' EXIT
 
-curl --fail --location --silent --show-error \
-    "$release_base_url/$archive_name" -o "$temporary_dir/$archive_name"
-curl --fail --location --silent --show-error \
-    "$release_base_url/SHA256SUMS" -o "$temporary_dir/SHA256SUMS"
+archive_path="${HMG_ARCHIVE_PATH:-}"
+checksums_path="${HMG_CHECKSUMS_PATH:-}"
+if [[ -n "$archive_path" || -n "$checksums_path" ]]; then
+    [[ -f "$archive_path" && -f "$checksums_path" ]] || {
+        echo "Both HMG_ARCHIVE_PATH and HMG_CHECKSUMS_PATH must reference files." >&2
+        exit 1
+    }
+    cp -- "$archive_path" "$temporary_dir/$archive_name"
+    cp -- "$checksums_path" "$temporary_dir/SHA256SUMS"
+else
+    curl --fail --location --silent --show-error \
+        "$release_base_url/$archive_name" -o "$temporary_dir/$archive_name"
+    curl --fail --location --silent --show-error \
+        "$release_base_url/SHA256SUMS" -o "$temporary_dir/SHA256SUMS"
+fi
 
 (
     cd "$temporary_dir"
@@ -40,6 +51,18 @@ curl --fail --location --silent --show-error \
     printf '%s\n' "$checksum_line" | sha256sum --check -
     tar -xzf "$archive_name"
 )
+
+wait_pid="${HMG_WAIT_PID:-}"
+if [[ "$wait_pid" =~ ^[0-9]+$ ]] && [[ "$wait_pid" != "0" ]] && [[ "$wait_pid" != "$$" ]]; then
+    for _attempt in {1..600}; do
+        kill -0 "$wait_pid" >/dev/null 2>&1 || break
+        sleep 0.2
+    done
+    if kill -0 "$wait_pid" >/dev/null 2>&1; then
+        echo "Timed out waiting for the running application to close." >&2
+        exit 1
+    fi
+fi
 
 mkdir -p "$install_dir" "$applications_dir"
 install -m 755 "$temporary_dir/$binary_name" "$install_dir/$binary_name"

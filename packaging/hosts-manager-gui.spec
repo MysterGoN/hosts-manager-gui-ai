@@ -36,7 +36,7 @@ analysis = Analysis(
     [str(project_root / "src" / "hmg" / "__main__.py")],
     pathex=[str(project_root / "src")],
     binaries=extra_binaries,
-    datas=[],
+    datas=[(str(project_root / "pyproject.toml"), ".")],
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},

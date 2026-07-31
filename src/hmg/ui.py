@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, QPoint, QRectF, QSignalBlocker, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QModelIndex, QPoint, QRectF, QSignalBlocker, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QCloseEvent,
     QColor,
@@ -117,6 +117,15 @@ from hmg.sources import (
     save_sources_state,
     summarize_source_changes,
     validate_source_url,
+)
+from hmg.updater import (
+    PreparedUpdate,
+    ReleaseInfo,
+    current_version,
+    fetch_latest_release,
+    is_update_available,
+    launch_update,
+    prepare_update,
 )
 
 logger = get_logger(__name__)
@@ -980,7 +989,7 @@ class HelpDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
-        title = QLabel("Справка")
+        title = QLabel(f"Справка · версия {current_version()}")
         title.setObjectName("sectionTitle")
         layout.addWidget(title)
 
@@ -1007,6 +1016,11 @@ class HelpDialog(QDialog):
             <b>Источники</b>, а загрузка запускается отдельно через <b>Загрузка из URL</b>.
             Перед применением всегда показывается preview.</p>
 
+            <h2>Обновление</h2>
+            <p>Кнопка <b>Обновление</b> проверяет последний GitHub Release. Собранное
+            приложение может скачать проверенный установщик, закрыться, обновиться и
+            запуститься снова. При запуске из исходников Release открывается в браузере.</p>
+
             <h2>Клавиатура</h2>
             <table cellspacing="6">
               <tr><td><code>Ctrl/Cmd+N</code></td><td>Добавить запись</td></tr>
@@ -1031,6 +1045,90 @@ class HelpDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.button(QDialogButtonBox.StandardButton.Close).setText("Закрыть")
         buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
+class UpdateCheckWorker(QThread):
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def run(self) -> None:
+        try:
+            self.completed.emit(fetch_latest_release())
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class UpdatePrepareWorker(QThread):
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, release: ReleaseInfo, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.release = release
+
+    def run(self) -> None:
+        try:
+            self.completed.emit(prepare_update(self.release))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class UpdateDialog(QDialog):
+    def __init__(
+        self,
+        parent: QWidget,
+        release: ReleaseInfo,
+        installed_version: str,
+        *,
+        has_unapplied_changes: bool,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Доступно обновление")
+        self.setMinimumSize(680, 520)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        title = QLabel(f"Доступна версия {release.tag_name}")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+
+        versions = QLabel(f"Установлено: {installed_version} · Доступно: {release.tag_name}")
+        versions.setObjectName("subtitle")
+        layout.addWidget(versions)
+
+        if has_unapplied_changes:
+            warning = QLabel(
+                "Есть изменения, ещё не применённые к системному hosts. Они сохранены в local state "
+                "и останутся после обновления."
+            )
+            warning.setWordWrap(True)
+            warning.setStyleSheet("color: #F0C674;")
+            layout.addWidget(warning)
+
+        notes_label = QLabel("Что изменилось")
+        notes_label.setObjectName("sectionTitle")
+        layout.addWidget(notes_label)
+        notes = QTextBrowser()
+        notes.setAccessibleName("Описание обновления")
+        notes.setOpenExternalLinks(True)
+        notes.setMarkdown(release.notes or "Описание изменений не указано.")
+        layout.addWidget(notes, 1)
+
+        hint = QLabel(
+            "Установщик и архив будут проверены по SHA-256. Приложение закроется и "
+            "автоматически запустится после обновления."
+        )
+        hint.setWordWrap(True)
+        hint.setObjectName("hint")
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox()
+        later = buttons.addButton("Позже", QDialogButtonBox.ButtonRole.RejectRole)
+        later.clicked.connect(self.reject)
+        install_button = buttons.addButton("Установить и перезапустить", QDialogButtonBox.ButtonRole.AcceptRole)
+        install_button.setObjectName("primary")
+        install_button.clicked.connect(self.accept)
         layout.addWidget(buttons)
 
 
@@ -1998,6 +2096,10 @@ class HostsApp(QMainWindow):
         self._collapsed_group_ids: set[str] = set()
         self._group_status_labels: dict[str, QLabel] = {}
         self._refreshing = False
+        self._update_check_worker: UpdateCheckWorker | None = None
+        self._update_prepare_worker: UpdatePrepareWorker | None = None
+        self._prepared_update: PreparedUpdate | None = None
+        self._update_in_progress = False
 
         self.load_initial_data()
         self.create_widgets()
@@ -2055,6 +2157,10 @@ class HostsApp(QMainWindow):
         refresh.setToolTip("Заново прочитать local state и системный hosts (F5)")
         refresh.clicked.connect(self.reload)
         header.addWidget(refresh)
+        self.update_button = QPushButton("Обновление")
+        self.update_button.setToolTip(f"Проверить обновления · установлена версия {current_version()}")
+        self.update_button.clicked.connect(self.check_for_updates)
+        header.addWidget(self.update_button)
         settings_button = QPushButton("Настройки")
         settings_button.setToolTip("Открыть настройки (Ctrl+,)")
         settings_button.clicked.connect(self.manage_settings)
@@ -2250,6 +2356,121 @@ class HostsApp(QMainWindow):
 
     def show_help(self) -> None:
         HelpDialog(self).exec()
+
+    def check_for_updates(self) -> None:
+        if self._update_check_worker is not None:
+            return
+        self.update_button.setEnabled(False)
+        self.update_button.setText("Проверка…")
+        self.show_feedback("Проверяем последний GitHub Release…", kind="info")
+        worker = UpdateCheckWorker(self)
+        worker.completed.connect(self._handle_update_check)
+        worker.failed.connect(self._handle_update_check_error)
+        worker.finished.connect(self._finish_update_check)
+        self._update_check_worker = worker
+        worker.start()
+
+    def _handle_update_check(self, result: object) -> None:
+        if not isinstance(result, ReleaseInfo):
+            self._handle_update_check_error("GitHub вернул некорректное описание релиза")
+            return
+        installed_version = current_version()
+        if not is_update_available(result, installed_version):
+            QMessageBox.information(
+                self,
+                "Обновление",
+                f"Установлена актуальная версия {installed_version}.",
+            )
+            return
+
+        if not is_packaged():
+            if confirm_action(
+                self,
+                "Доступно обновление",
+                f"Доступна версия {result.tag_name}.\n\n"
+                "Автоматическая установка работает только в собранном приложении. "
+                "Открыть Release в браузере?",
+                "Открыть Release",
+            ):
+                QDesktopServices.openUrl(QUrl(result.html_url))
+            return
+
+        dialog = UpdateDialog(
+            self,
+            result,
+            installed_version,
+            has_unapplied_changes=has_unapplied_hosts_changes(
+                self.entries,
+                self.groups,
+                self._applied_hosts_snapshot,
+            ),
+        )
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._prepare_update(result)
+
+    def _handle_update_check_error(self, message: str) -> None:
+        logger.warning("update_check_failed", error=message)
+        QMessageBox.warning(self, "Обновление", f"Не удалось проверить обновления:\n{message}")
+
+    def _finish_update_check(self) -> None:
+        worker = self._update_check_worker
+        self._update_check_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        if self._update_prepare_worker is None:
+            self.update_button.setEnabled(True)
+            self.update_button.setText("Обновление")
+
+    def _prepare_update(self, release: ReleaseInfo) -> None:
+        if self._update_prepare_worker is not None:
+            return
+        self.update_button.setEnabled(False)
+        self.update_button.setText("Скачивание…")
+        self.show_feedback(
+            f"Скачиваем и проверяем установщик {release.tag_name}…",
+            kind="info",
+            duration_ms=120_000,
+        )
+        worker = UpdatePrepareWorker(release, self)
+        worker.completed.connect(self._handle_prepared_update)
+        worker.failed.connect(self._handle_update_prepare_error)
+        worker.finished.connect(self._finish_update_prepare)
+        self._update_prepare_worker = worker
+        worker.start()
+
+    def _handle_prepared_update(self, result: object) -> None:
+        if not isinstance(result, PreparedUpdate):
+            self._handle_update_prepare_error("Не удалось подготовить установщик")
+            return
+        self._prepared_update = result
+
+    def _launch_prepared_update(self, prepared: PreparedUpdate) -> None:
+        try:
+            launch_update(prepared)
+        except Exception as exc:
+            logger.exception("update_launch_failed")
+            self._handle_update_prepare_error(str(exc))
+            return
+        logger.info("update_installer_started", version=prepared.release.tag_name)
+        self._update_in_progress = True
+        self.close()
+
+    def _handle_update_prepare_error(self, message: str) -> None:
+        logger.warning("update_prepare_failed", error=message)
+        QMessageBox.warning(self, "Обновление", f"Не удалось подготовить обновление:\n{message}")
+
+    def _finish_update_prepare(self) -> None:
+        worker = self._update_prepare_worker
+        self._update_prepare_worker = None
+        if worker is not None:
+            worker.deleteLater()
+        prepared = self._prepared_update
+        self._prepared_update = None
+        if prepared is not None:
+            self._launch_prepared_update(prepared)
+        if not self._update_in_progress:
+            self.update_button.setEnabled(True)
+            self.update_button.setText("Обновление")
 
     def refresh_filter_options(self) -> None:
         def replace_options(
@@ -2969,6 +3190,18 @@ class HostsApp(QMainWindow):
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self._update_in_progress:
+            event.accept()
+            return
+        active_update_worker = self._update_check_worker or self._update_prepare_worker
+        if active_update_worker is not None and active_update_worker.isRunning():
+            QMessageBox.information(
+                self,
+                "Обновление",
+                "Дождитесь завершения проверки или скачивания обновления.",
+            )
+            event.ignore()
+            return
         if not has_unapplied_hosts_changes(
             self.entries,
             self.groups,
@@ -3008,6 +3241,7 @@ def main() -> int:
         application = QApplication(sys.argv)
     assert isinstance(application, QApplication)
     application.setApplicationName(APP_NAME)
+    application.setApplicationVersion(current_version())
     application.setStyle("Fusion")
     application.setStyleSheet(APP_STYLE)
     window = HostsApp()

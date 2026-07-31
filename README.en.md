@@ -8,6 +8,11 @@ English | [Русский](README.md)
 > the code, path settings, and backup behavior before use. The application modifies
 > the system `hosts` file with administrator privileges — use it at your own risk.
 
+> [!WARNING]
+> This repository is experimental. Pull requests are not currently reviewed or
+> accepted. Bug reports and suggestions are welcome in
+> [GitHub Issues](https://github.com/MysterGoN/hosts-manager-gui/issues).
+
 A desktop application for managing a dedicated HMG block in the system `hosts`
 file. The interface is built with PySide6/Qt and uses a dark QSS theme.
 
@@ -81,10 +86,21 @@ curl -fLO https://github.com/MysterGoN/hosts-manager-gui/releases/latest/downloa
 bash uninstall-macos.sh
 ```
 
-To update, close the application and run the installer again. Uninstallers
-remove the application and shortcuts but intentionally preserve settings, local
-state, logs, backups, and changes to the system `hosts` file. Remove those
-separately if needed after checking the paths shown in Settings.
+In an installed build, use the Update button in the window header. The
+application checks the latest GitHub Release only when this button is pressed,
+shows the release notes, downloads and verifies the installer and application
+archive, closes, and launches again after installation. You can run the installer
+script again manually if in-app updating is unavailable.
+
+The repository and published GitHub Release must be public for update checks and
+installation. The application neither requests nor stores a GitHub token, so a
+private repository returns HTTP 404.
+
+When running from source, the button opens the Release page; update the source
+tree and dependencies manually. Uninstallers remove the application and
+shortcuts but intentionally preserve settings, local state, logs, backups, and
+changes to the system `hosts` file. Remove those separately if needed after
+checking the paths shown in Settings.
 
 ## Running from source
 
