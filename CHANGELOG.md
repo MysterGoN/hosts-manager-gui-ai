@@ -1,3 +1,9 @@
+## v0.3.0 (2026-07-31)
+
+### Feat
+
+- **install**: add platform installer scripts
+
 ## v0.2.2 (2026-07-31)
 
 ### Fix
