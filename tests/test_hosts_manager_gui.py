@@ -1,6 +1,6 @@
 import platform
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 from PySide6.QtCore import Qt
@@ -365,9 +365,9 @@ def test_write_hosts_creates_backup_and_writes_content(tmp_path: Path) -> None:
 
 def test_elevated_write_shell_script_quotes_paths() -> None:
     script = hmg.elevated_write_shell_script(
-        Path("/tmp/hosts dir/hosts"),
-        Path("/tmp/source file"),
-        Path("/tmp/hosts dir/hosts.backup"),
+        PurePosixPath("/tmp/hosts dir/hosts"),
+        PurePosixPath("/tmp/source file"),
+        PurePosixPath("/tmp/hosts dir/hosts.backup"),
     )
 
     assert "mkdir -p '/tmp/hosts dir'" in script

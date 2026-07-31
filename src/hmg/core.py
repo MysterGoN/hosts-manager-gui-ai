@@ -14,7 +14,7 @@ import uuid
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import TypedDict
 
 from hmg.logging import get_logger
@@ -438,7 +438,7 @@ def write_hosts_elevated(path: Path, content: str) -> Path:
         temp_path.unlink(missing_ok=True)
 
 
-def elevated_write_shell_script(path: Path, temp_path: Path, backup: Path) -> str:
+def elevated_write_shell_script(path: PurePath, temp_path: PurePath, backup: PurePath) -> str:
     parent = shlex.quote(str(path.parent))
     target = shlex.quote(str(path))
     temp = shlex.quote(str(temp_path))
