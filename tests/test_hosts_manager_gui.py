@@ -48,8 +48,17 @@ def test_host_entry_normalizes_domain_deduplicates_ips_and_selects_first_ip() ->
 
 
 def test_host_entry_rejects_empty_ip_list() -> None:
-    with pytest.raises(ValueError, match="must have at least one IP"):
+    with pytest.raises(ValueError, match="нужен хотя бы один IP"):
         hmg.HostEntry(domain="example.test", ips=[])
+
+
+def test_validation_errors_are_localized() -> None:
+    with pytest.raises(ValueError, match="Некорректный IP-адрес"):
+        hmg.validate_ip("not-an-ip")
+    with pytest.raises(ValueError, match="Некорректное имя домена"):
+        hmg.validate_domain("bad domain")
+    with pytest.raises(ValueError, match="Данные для импорта не указаны"):
+        hmg.parse_import_text("  ")
 
 
 def test_set_ips_replace_updates_selected_ip_when_removed() -> None:
@@ -285,7 +294,7 @@ def test_parse_import_text_supports_json_array() -> None:
 
 
 def test_parse_import_text_reports_invalid_delimited_line() -> None:
-    with pytest.raises(ValueError, match=r"Строка 2: .*Invalid IP address"):
+    with pytest.raises(ValueError, match=r"Строка 2: .*Некорректный IP-адрес"):
         hmg.parse_import_text("example.test 127.0.0.1\nbroken.test not-an-ip\n")
 
 
@@ -441,10 +450,31 @@ def test_large_unchanged_diff_sections_are_collapsed_with_real_line_numbers() ->
     after = format_displayed_diff_side(displayed, "after")
 
     assert sum(row.is_collapsed for row in displayed) == 2
-    assert any("15  line 15" in line for line in before)
-    assert any("15  changed line" in line for line in after)
-    assert before[0].startswith("      ⋯")
-    assert before[-1].startswith("      ⋯")
+    assert any("15 ≈ line 15" in line for line in before)
+    assert any("15 ≈ changed line" in line for line in after)
+    assert before[0].startswith("     ⋯")
+    assert before[-1].startswith("     ⋯")
+
+
+def test_displayed_diff_uses_text_markers_in_addition_to_color() -> None:
+    rows = build_side_by_side_diff(
+        "# Generated at old\nremoved\n",
+        "# Generated at new\nchanged\nadded\n",
+    )
+    displayed = collapse_unchanged_diff_rows(rows)
+
+    assert format_displayed_diff_side(displayed, "before") == [
+        "   1 • # Generated at old",
+        "   2 ≈ removed",
+        "       ",
+    ]
+    assert format_displayed_diff_side(displayed, "after") == [
+        "   1 • # Generated at new",
+        "   2 ≈ changed",
+        "   3 + added",
+    ]
+    removed = collapse_unchanged_diff_rows(build_side_by_side_diff("kept\nremoved\n", "kept\n"))
+    assert format_displayed_diff_side(removed, "before")[-1] == "   2 − removed"
 
 
 def test_diff_line_numbers_follow_each_file_and_skip_placeholders() -> None:

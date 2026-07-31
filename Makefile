@@ -4,7 +4,7 @@ DOCKER_PLATFORM ?= linux/amd64
 DOCKER_ARCH ?= amd64
 DOCKER_PYTHON_IMAGE ?= python:3.14-bookworm
 
-.PHONY: help setup run test lint format typecheck audit check pre-commit install-hooks build build-app build-linux-docker build-linux-arm64-docker build-linux-docker-all clean
+.PHONY: help setup run test lint format typecheck audit check check-ui-scaling pre-commit install-hooks build build-app build-linux-docker build-linux-arm64-docker build-linux-docker-all clean
 
 help:
 	@printf "Доступные цели:\n"
@@ -16,6 +16,7 @@ help:
 	@printf "  typecheck      Запустить mypy\n"
 	@printf "  audit          Проверить зависимости на известные уязвимости\n"
 	@printf "  check          Запустить lint, typecheck, audit и тесты\n"
+	@printf "  check-ui-scaling Проверить Qt-окна при scaling 100-200%%\n"
 	@printf "  pre-commit     Запустить все pre-commit хуки для всех файлов\n"
 	@printf "  install-hooks  Установить git hooks pre-commit\n"
 	@printf "  build          Собрать sdist и wheel\n"
@@ -42,12 +43,15 @@ format:
 	$(UV) run ruff check . --fix
 
 typecheck:
-	$(UV) run mypy src tests
+	$(UV) run mypy src tests scripts
 
 audit:
 	$(UV) --preview-features audit-command audit --frozen
 
 check: lint typecheck audit test
+
+check-ui-scaling:
+	$(UV) run python scripts/check_ui_scaling.py
 
 pre-commit:
 	$(UV) run pre-commit run --all-files

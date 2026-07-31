@@ -71,17 +71,17 @@ def validate_ip(value: str) -> str:
     try:
         ipaddress.ip_address(value)
     except ValueError as exc:
-        raise ValueError(f"Invalid IP address: {value}") from exc
+        raise ValueError(f"Некорректный IP-адрес: {value}") from exc
     return value
 
 
 def validate_domain(value: str) -> str:
     domain = normalize_domain(value)
     if not domain:
-        raise ValueError("Domain is empty")
+        raise ValueError("Домен не указан")
     # hosts can contain local aliases without dots. We allow them.
     if not DOMAIN_RE.match(domain):
-        raise ValueError(f"Invalid domain/host name: {value}")
+        raise ValueError(f"Некорректное имя домена или хоста: {value}")
     return domain
 
 
@@ -95,9 +95,9 @@ class HostGroup:
         self.id = self.id.strip()
         self.name = self.name.strip()
         if not self.id:
-            raise ValueError("Group ID is empty")
+            raise ValueError("Идентификатор группы не указан")
         if not self.name:
-            raise ValueError("Group name is empty")
+            raise ValueError("Название группы не указано")
 
 
 def default_group() -> HostGroup:
@@ -121,7 +121,7 @@ class HostEntry:
                 clean_ips.append(ip)
         self.ips = clean_ips
         if not self.ips:
-            raise ValueError(f"Domain {self.domain!r} must have at least one IP")
+            raise ValueError(f"Для домена {self.domain!r} нужен хотя бы один IP")
         if self.selected_ip:
             self.selected_ip = validate_ip(self.selected_ip)
         if not self.selected_ip or self.selected_ip not in self.ips:
@@ -146,7 +146,7 @@ class HostEntry:
             if ip not in clean:
                 clean.append(ip)
         if not clean:
-            raise ValueError(f"Domain {self.domain!r} must have at least one IP")
+            raise ValueError(f"Для домена {self.domain!r} нужен хотя бы один IP")
         old = set(self.ips)
         new = set(clean)
         added = sorted(new - old)
@@ -461,13 +461,15 @@ def run_elevated_write_macos(path: Path, temp_path: Path, backup: Path) -> None:
     )
     if result.returncode != 0:
         logger.warning("hosts_elevated_write_failed", platform="macos", returncode=result.returncode)
-        raise ElevatedWriteError(result.stderr.strip() or result.stdout.strip() or "Administrator authorization failed")
+        raise ElevatedWriteError(
+            result.stderr.strip() or result.stdout.strip() or "Не удалось получить права администратора"
+        )
 
 
 def run_elevated_write_linux(path: Path, temp_path: Path, backup: Path) -> None:
     if shutil.which("pkexec") is None:
         logger.warning("hosts_elevated_write_unavailable", platform="linux", tool="pkexec")
-        raise ElevatedWriteError("pkexec is not available")
+        raise ElevatedWriteError("Утилита pkexec недоступна")
     logger.info("hosts_elevated_write_platform", platform="linux", path=str(path), backup=str(backup))
     script = elevated_write_shell_script(path, temp_path, backup)
     result = subprocess.run(
@@ -478,7 +480,9 @@ def run_elevated_write_linux(path: Path, temp_path: Path, backup: Path) -> None:
     )
     if result.returncode != 0:
         logger.warning("hosts_elevated_write_failed", platform="linux", returncode=result.returncode)
-        raise ElevatedWriteError(result.stderr.strip() or result.stdout.strip() or "Administrator authorization failed")
+        raise ElevatedWriteError(
+            result.stderr.strip() or result.stdout.strip() or "Не удалось получить права администратора"
+        )
 
 
 def run_elevated_write_windows(path: Path, temp_path: Path, backup: Path) -> None:
@@ -518,7 +522,7 @@ def run_elevated_write_windows(path: Path, temp_path: Path, backup: Path) -> Non
         if result.returncode != 0:
             logger.warning("hosts_elevated_write_failed", platform="windows", returncode=result.returncode)
             raise ElevatedWriteError(
-                result.stderr.strip() or result.stdout.strip() or "Administrator authorization failed"
+                result.stderr.strip() or result.stdout.strip() or "Не удалось получить права администратора"
             )
     finally:
         script_path.unlink(missing_ok=True)
@@ -602,7 +606,7 @@ def parse_csv_file(path: Path) -> dict[str, HostEntry]:
 
 def parse_import_text(text: str) -> dict[str, HostEntry]:
     if not text.strip():
-        raise ValueError("Import text is empty")
+        raise ValueError("Данные для импорта не указаны")
 
     stripped = text.lstrip()
     if stripped.startswith("[") or stripped.startswith("{"):
@@ -621,7 +625,7 @@ def parse_json_import_text(text: str) -> dict[str, HostEntry]:
     except json.JSONDecodeError as exc:
         raise ValueError(f"Строка {exc.lineno}, колонка {exc.colno}: некорректный JSON") from exc
     if not isinstance(payload, list):
-        raise ValueError("JSON import must be an array of objects")
+        raise ValueError("JSON для импорта должен быть массивом объектов")
 
     entries: dict[str, HostEntry] = {}
     for index, item in enumerate(payload, start=1):
@@ -655,7 +659,7 @@ def parse_delimited_import_text(text: str) -> dict[str, HostEntry]:
     else:
         rows = split_whitespace_rows(text)
     if not rows:
-        raise ValueError("Import text contains no rows")
+        raise ValueError("Данные для импорта не содержат строк")
 
     header = [c.strip().lower() for c in rows[0][1]]
     has_header = "domain" in header and ("ip" in header or "ips" in header)
@@ -701,7 +705,7 @@ def add_import_row(entries: dict[str, HostEntry], domain_raw: str, ips_raw: str)
     domain = validate_domain(domain_raw)
     ips = split_ips(ips_raw)
     if not ips:
-        raise ValueError(f"No IPs for domain {domain}")
+        raise ValueError(f"Для домена {domain} не указаны IP-адреса")
     ips = [validate_ip(ip) for ip in ips]
     if domain not in entries:
         entries[domain] = HostEntry(domain=domain, ips=ips, selected_ip=ips[0], enabled=True)

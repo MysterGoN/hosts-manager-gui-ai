@@ -5,6 +5,7 @@ import re
 import shutil
 import signal
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,9 +18,11 @@ from PySide6.QtGui import (
     QDropEvent,
     QFont,
     QFontDatabase,
+    QKeySequence,
     QPainter,
     QPaintEvent,
     QPen,
+    QShortcut,
     QTextCursor,
     QTextFormat,
 )
@@ -200,6 +203,10 @@ QPushButton {
 }
 QPushButton:hover { background: #2C303B; border-color: #464B5A; }
 QPushButton:pressed { background: #20232B; }
+QPushButton:focus {
+    border: 2px solid #A78BFA;
+    padding: 0 15px;
+}
 QPushButton:disabled {
     background: #1C1E25;
     border-color: #292C35;
@@ -223,7 +230,11 @@ QToolButton {
     font-weight: 700;
 }
 QToolButton:hover { background: #303440; }
-QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QListWidget {
+QToolButton:focus {
+    border: 2px solid #A78BFA;
+    background: #303440;
+}
+QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QListWidget, QSpinBox {
     background: #16181E;
     border: 1px solid #323640;
     border-radius: 8px;
@@ -231,8 +242,8 @@ QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QListWidget {
     selection-background-color: #8067E8;
     selection-color: white;
 }
-QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QListWidget:focus {
-    border: 1px solid #7C5CFC;
+QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QListWidget:focus, QSpinBox:focus {
+    border: 2px solid #A78BFA;
 }
 QComboBox { padding: 6px 10px; }
 QComboBox::drop-down { border: 0; width: 26px; }
@@ -251,6 +262,7 @@ QTableWidget {
     selection-color: #FFFFFF;
 }
 QTableWidget::item { padding: 8px; border-bottom: 1px solid #252832; }
+QTableWidget:focus { border: 2px solid #A78BFA; }
 QHeaderView::section {
     background: #20232B;
     color: #AEB1BC;
@@ -263,14 +275,12 @@ QCheckBox::indicator, QRadioButton::indicator {
     width: 18px;
     height: 18px;
 }
-QCheckBox::indicator {
-    border: 2px solid #626673;
-    border-radius: 5px;
-    background: #17191F;
-}
-QCheckBox::indicator:checked {
-    background: #7C5CFC;
-    border-color: #7C5CFC;
+QCheckBox:focus, QRadioButton:focus {
+    color: #FFFFFF;
+    background: #29243D;
+    border: 1px solid #A78BFA;
+    border-radius: 6px;
+    padding: 3px;
 }
 QRadioButton::indicator {
     border: 2px solid #626673;
@@ -395,7 +405,7 @@ def move_entries_to_group(
     groups: list[HostGroup],
 ) -> list[str]:
     if group_id not in {group.id for group in groups}:
-        raise ValueError("Unknown group")
+        raise ValueError("Неизвестная группа")
     moved: list[str] = []
     for domain in dict.fromkeys(domains):
         entry = entries.get(domain)
@@ -412,7 +422,7 @@ def remove_group(
     group_id: str,
 ) -> tuple[list[HostGroup], list[str]]:
     if group_id == DEFAULT_GROUP_ID:
-        raise ValueError("Default group cannot be removed")
+        raise ValueError("Группу Default нельзя удалить")
     if group_id not in {group.id for group in groups}:
         return groups, []
     moved = [entry.domain for entry in entries.values() if entry.group_id == group_id]
@@ -625,9 +635,15 @@ class HostsDiffPreview(QDialog):
 
         navigation = QHBoxLayout()
         self.previous_change_button = QPushButton("← Предыдущее")
+        self.previous_change_button.setShortcut(QKeySequence("Shift+F7"))
+        self.previous_change_button.setToolTip("Предыдущее изменение (Shift+F7)")
+        self.previous_change_button.setAccessibleDescription(self.previous_change_button.toolTip())
         self.previous_change_button.clicked.connect(lambda: self.navigate_change(-1))
         navigation.addWidget(self.previous_change_button)
         self.next_change_button = QPushButton("Следующее →")
+        self.next_change_button.setShortcut(QKeySequence("F7"))
+        self.next_change_button.setToolTip("Следующее изменение (F7)")
+        self.next_change_button.setAccessibleDescription(self.next_change_button.toolTip())
         self.next_change_button.clicked.connect(lambda: self.navigate_change(1))
         navigation.addWidget(self.next_change_button)
         self.change_position = QLabel()
@@ -686,6 +702,8 @@ class HostsDiffPreview(QDialog):
         editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         editor.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         editor.setFont(monospace_font(12))
+        editor.setAccessibleName(f"Diff: {title}")
+        editor.setAccessibleDescription("Номера строк и маркеры изменений находятся в начале каждой строки")
         layout.addWidget(editor)
         return panel, editor
 
@@ -788,7 +806,7 @@ def collapse_unchanged_diff_rows(
     collapse_threshold: int = 8,
 ) -> list[DisplayedDiffRow]:
     if context < 0 or collapse_threshold < 1:
-        raise ValueError("Diff context and collapse threshold must be positive")
+        raise ValueError("Контекст diff не может быть отрицательным, а порог сворачивания должен быть положительным")
 
     annotated: list[DisplayedDiffRow] = []
     before_number = 0
@@ -841,22 +859,29 @@ def collapse_unchanged_diff_rows(
 
 def format_displayed_diff_side(rows: list[DisplayedDiffRow], side: str) -> list[str]:
     if side not in {"before", "after"}:
-        raise ValueError(f"Unknown diff side: {side}")
+        raise ValueError(f"Неизвестная сторона diff: {side}")
     result: list[str] = []
     for row in rows:
         if row.is_collapsed:
-            result.append(f"      ⋯ {row.hidden_count} неизменённых строк ⋯")
+            result.append(f"     ⋯ {row.hidden_count} неизменённых строк ⋯")
             continue
         line = row.before_line if side == "before" else row.after_line
         number = row.before_number if side == "before" else row.after_number
-        result.append("      " if number is None else f"{number:>4}  {line}")
+        tag = row.before_tag if side == "before" else row.after_tag
+        marker = {
+            "added": "+",
+            "removed": "−",
+            "changed": "≈",
+            "service": "•",
+        }.get(tag or "", " ")
+        result.append("       " if number is None else f"{number:>4} {marker} {line}")
     return result
 
 
 def format_numbered_diff_side(rows: list[DiffRow], side: str) -> list[str]:
     """Add source-specific line numbers while keeping diff placeholders aligned."""
     if side not in {"before", "after"}:
-        raise ValueError(f"Unknown diff side: {side}")
+        raise ValueError(f"Неизвестная сторона diff: {side}")
 
     result: list[str] = []
     line_number = 0
@@ -926,11 +951,14 @@ class EntryDialog(QDialog):
         self.domain_edit = QLineEdit(entry.domain if entry else "")
         self.domain_edit.setFont(monospace_font())
         self.domain_edit.setPlaceholderText("example.local")
+        self.domain_edit.setAccessibleName("Домен")
         form.addRow("Домен", self.domain_edit)
         self.ips_edit = QTextEdit()
         self.ips_edit.setFont(monospace_font())
         self.ips_edit.setMinimumHeight(130)
         self.ips_edit.setPlaceholderText("127.0.0.1\n::1")
+        self.ips_edit.setAccessibleName("IP-адреса")
+        self.ips_edit.setAccessibleDescription("Один IP на строку или через точку с запятой или пробел")
         if entry:
             self.ips_edit.setPlainText("\n".join(entry.ips))
         form.addRow("IP-адреса", self.ips_edit)
@@ -1008,6 +1036,8 @@ class ImportDialog(QDialog):
         mode_layout = QHBoxLayout(mode_box)
         self.merge_radio = QRadioButton("Обновить существующие")
         self.replace_radio = QRadioButton("Заменить всё")
+        self.merge_radio.setAccessibleDescription("Добавляет новые записи и IP, сохраняя остальные данные")
+        self.replace_radio.setAccessibleDescription("Полностью заменяет текущий список импортированными данными")
         self.merge_radio.setChecked(True)
         mode_layout.addWidget(self.merge_radio)
         mode_layout.addWidget(self.replace_radio)
@@ -1035,6 +1065,8 @@ class ImportDialog(QDialog):
         self.import_text.setFont(monospace_font())
         self.import_text.setPlaceholderText("Перетащите сюда .txt, .csv, .tsv или .json\n\nexample.local  127.0.0.1")
         self.import_text.file_dropped.connect(self.load_path)
+        self.import_text.setAccessibleName("Данные для импорта")
+        self.import_text.setAccessibleDescription("Можно вставить текст или перетащить поддерживаемый файл")
         layout.addWidget(self.import_text, 1)
 
         self.import_status = QLabel("Добавьте данные или перетащите файл")
@@ -1106,38 +1138,6 @@ class ImportDialog(QDialog):
         self.accept()
 
 
-class SelectIpDialog(QDialog):
-    def __init__(self, parent: QWidget, entry: HostEntry) -> None:
-        super().__init__(parent)
-        self.selected_ip: str | None = None
-        self.setWindowTitle(f"Выбор IP для {entry.domain}")
-        self.resize(440, 380)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        label = QLabel(entry.domain)
-        label.setObjectName("sectionTitle")
-        layout.addWidget(label)
-        self.list_widget = QListWidget()
-        self.list_widget.setFont(monospace_font())
-        self.list_widget.addItems(entry.ips)
-        if entry.selected_ip in entry.ips:
-            self.list_widget.setCurrentRow(entry.ips.index(entry.selected_ip))
-        layout.addWidget(self.list_widget)
-        buttons = dialog_buttons(self, "Выбрать")
-        buttons.accepted.disconnect()
-        buttons.accepted.connect(self.choose)
-        layout.addWidget(buttons)
-        self.list_widget.itemDoubleClicked.connect(lambda _item: self.choose())
-
-    def choose(self) -> None:
-        item = self.list_widget.currentItem()
-        if item is None:
-            QMessageBox.warning(self, APP_NAME, "Выберите IP")
-            return
-        self.selected_ip = item.text()
-        self.accept()
-
-
 class SourceEditDialog(QDialog):
     def __init__(self, parent: QWidget, source: UrlSource | None = None) -> None:
         super().__init__(parent)
@@ -1154,9 +1154,11 @@ class SourceEditDialog(QDialog):
         form = QFormLayout()
         self.name_edit = QLineEdit(source.name if source else "")
         self.name_edit.setPlaceholderText("Рабочие домены")
+        self.name_edit.setAccessibleName("Название URL-источника")
         form.addRow("Название", self.name_edit)
         self.url_edit = QLineEdit(source.url if source else "")
         self.url_edit.setPlaceholderText("https://example.com/hosts")
+        self.url_edit.setAccessibleName("Адрес URL-источника")
         form.addRow("URL", self.url_edit)
         self.enabled_check = QCheckBox("Использовать при синхронизации")
         self.enabled_check.setChecked(source.enabled if source else True)
@@ -1208,6 +1210,8 @@ class SourcesDialog(QDialog):
 
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Активен", "Название", "URL"])
+        self.table.setAccessibleName("URL-источники")
+        self.table.setAccessibleDescription("Таблица активных состояний, названий и адресов источников")
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -1232,10 +1236,12 @@ class SourcesDialog(QDialog):
         edit_row.addWidget(delete_button)
         up_button = QPushButton("↑")
         up_button.setToolTip("Поднять источник выше")
+        up_button.setAccessibleName("Поднять выбранный источник выше")
         up_button.clicked.connect(lambda: self.move_source(-1))
         edit_row.addWidget(up_button)
         down_button = QPushButton("↓")
         down_button.setToolTip("Опустить источник ниже")
+        down_button.setAccessibleName("Опустить выбранный источник ниже")
         down_button.clicked.connect(lambda: self.move_source(1))
         edit_row.addWidget(down_button)
         edit_row.addStretch()
@@ -1250,6 +1256,8 @@ class SourcesDialog(QDialog):
             self.table.insertRow(row)
             check = QCheckBox()
             check.setChecked(source.enabled)
+            check.setAccessibleName(f"Использовать источник {source.name}")
+            check.setToolTip(check.accessibleName())
             check.stateChanged.connect(lambda state, source_id=source.id: self.set_source_enabled(source_id, state))
             cell = QWidget()
             cell.setStyleSheet("background: transparent;")
@@ -1357,6 +1365,7 @@ class SourceSyncDialog(QDialog):
         sources_label.setObjectName("subtitle")
         layout.addWidget(sources_label)
         source_list = QListWidget()
+        source_list.setAccessibleName("Активные URL-источники в порядке обработки")
         for index, source in enumerate(self.active_sources, start=1):
             source_list.addItem(f"{index}. {source.name}  —  {source.url}")
         layout.addWidget(source_list, 1)
@@ -1431,6 +1440,8 @@ class SourceSyncPreview(QDialog):
 
         table = QTableWidget(0, 4)
         table.setHorizontalHeaderLabels(["Источник", "Результат", "Домены", "Подробности"])
+        table.setAccessibleName("Результаты загрузки URL-источников")
+        table.setAccessibleDescription("Для каждого источника показан успех или ошибка загрузки")
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         table.verticalHeader().setVisible(False)
@@ -1457,6 +1468,7 @@ class SourceSyncPreview(QDialog):
         preview = QTextEdit()
         preview.setReadOnly(True)
         preview.setFont(monospace_font())
+        preview.setAccessibleName("Предпросмотр изменений local state")
         preview.setPlainText("\n".join(format_source_change_summary(summary)))
         layout.addWidget(preview, 1)
 
@@ -1520,6 +1532,7 @@ class GroupsDialog(QDialog):
 
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Активна", "Название", "Записей"])
+        self.table.setAccessibleName("Группы доменов")
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -1544,10 +1557,12 @@ class GroupsDialog(QDialog):
         actions.addWidget(delete_button)
         up_button = QPushButton("↑")
         up_button.setToolTip("Поднять группу выше")
+        up_button.setAccessibleName("Поднять выбранную группу выше")
         up_button.clicked.connect(lambda: self.move_group(-1))
         actions.addWidget(up_button)
         down_button = QPushButton("↓")
         down_button.setToolTip("Опустить группу ниже")
+        down_button.setAccessibleName("Опустить выбранную группу ниже")
         down_button.clicked.connect(lambda: self.move_group(1))
         actions.addWidget(down_button)
         actions.addStretch()
@@ -1566,6 +1581,8 @@ class GroupsDialog(QDialog):
             check = QCheckBox()
             check.setChecked(group.enabled)
             check.setToolTip("Исключить или включить всю группу в hosts")
+            check.setAccessibleName(f"Включить группу {group.name} в hosts")
+            check.setAccessibleDescription(check.toolTip())
             check.stateChanged.connect(lambda state, group_id=group.id: self.set_group_enabled(group_id, state))
             cell = QWidget()
             cell.setStyleSheet("background: transparent;")
@@ -1695,7 +1712,8 @@ class SettingsDialog(QDialog):
         paths_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
         self.data_dir_edit = QLineEdit(settings.data_dir)
         self.data_dir_edit.setMinimumWidth(440)
-        paths_form.addRow("Каталог данных", self._path_picker(self.data_dir_edit))
+        self.data_dir_edit.setAccessibleName("Каталог данных")
+        paths_form.addRow("Каталог данных", self._path_picker(self.data_dir_edit, "каталога данных"))
         data_hint = QLabel("Здесь хранятся state.json и sources.json")
         data_hint.setObjectName("hint")
         paths_form.addRow("", data_hint)
@@ -1714,13 +1732,17 @@ class SettingsDialog(QDialog):
         logs_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
         self.log_dir_edit = QLineEdit(settings.log_dir)
         self.log_dir_edit.setMinimumWidth(440)
-        logs_form.addRow("Каталог логов", self._path_picker(self.log_dir_edit))
+        self.log_dir_edit.setAccessibleName("Каталог логов")
+        logs_form.addRow("Каталог логов", self._path_picker(self.log_dir_edit, "каталога логов"))
         self.log_level_combo = QComboBox()
+        self.log_level_combo.setAccessibleName("Уровень логирования")
         self.log_level_combo.addItems(LOG_LEVELS)
         self.log_level_combo.setCurrentText(settings.log_level)
         logs_form.addRow("Уровень", self.log_level_combo)
         self.log_size_spin = QSpinBox()
+        self.log_size_spin.setAccessibleName("Размер одного файла лога")
         self.log_size_unit_combo = QComboBox()
+        self.log_size_unit_combo.setAccessibleName("Единица размера файла лога")
         self.log_size_unit_combo.addItems(list(SIZE_UNITS))
         size_value, size_unit = split_measurement(settings.log_max_bytes, SIZE_UNITS)
         self.log_size_unit_combo.setCurrentText(size_unit)
@@ -1732,11 +1754,14 @@ class SettingsDialog(QDialog):
             self._measurement_input(self.log_size_spin, self.log_size_unit_combo),
         )
         self.log_backups_spin = QSpinBox()
+        self.log_backups_spin.setAccessibleName("Количество архивных файлов логов")
         self.log_backups_spin.setRange(1, 100)
         self.log_backups_spin.setValue(settings.log_backup_count)
         logs_form.addRow("Количество архивов", self.log_backups_spin)
         self.log_retention_spin = QSpinBox()
+        self.log_retention_spin.setAccessibleName("Срок хранения логов")
         self.log_retention_unit_combo = QComboBox()
+        self.log_retention_unit_combo.setAccessibleName("Единица срока хранения логов")
         self.log_retention_unit_combo.addItems(list(RETENTION_UNITS))
         retention_value, retention_unit = split_measurement(
             settings.log_retention_seconds,
@@ -1765,12 +1790,13 @@ class SettingsDialog(QDialog):
         buttons.accepted.connect(self.validate_and_accept)
         layout.addWidget(buttons)
 
-    def _path_picker(self, line_edit: QLineEdit) -> QWidget:
+    def _path_picker(self, line_edit: QLineEdit, accessible_target: str) -> QWidget:
         widget = QWidget()
         row = QHBoxLayout(widget)
         row.setContentsMargins(0, 0, 0, 0)
         row.addWidget(line_edit, 1)
         browse = QPushButton("Выбрать")
+        browse.setAccessibleName(f"Выбрать расположение {accessible_target}")
         browse.clicked.connect(lambda: self.choose_directory(line_edit))
         row.addWidget(browse)
         return widget
@@ -1899,10 +1925,11 @@ class HostsApp(QMainWindow):
         header.addLayout(titles)
         header.addStretch()
         refresh = QPushButton("Перечитать с диска")
-        refresh.setToolTip("Заново прочитать local state и системный hosts")
+        refresh.setToolTip("Заново прочитать local state и системный hosts (F5)")
         refresh.clicked.connect(self.reload)
         header.addWidget(refresh)
         settings_button = QPushButton("Настройки")
+        settings_button.setToolTip("Открыть настройки (Ctrl+,)")
         settings_button.clicked.connect(self.manage_settings)
         header.addWidget(settings_button)
         root.addLayout(header)
@@ -1923,9 +1950,11 @@ class HostsApp(QMainWindow):
         toolbar = QHBoxLayout()
         add_button = QPushButton("＋  Добавить")
         add_button.setObjectName("primary")
+        add_button.setToolTip("Добавить домен (Ctrl+N)")
         add_button.clicked.connect(self.add_entry)
         toolbar.addWidget(add_button)
         import_button = QPushButton("Импорт")
+        import_button.setToolTip("Импортировать записи (Ctrl+I)")
         import_button.clicked.connect(self.import_entries)
         toolbar.addWidget(import_button)
         sources_button = QPushButton("Источники")
@@ -1945,19 +1974,24 @@ class HostsApp(QMainWindow):
         filters = QHBoxLayout()
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Поиск по домену или IP")
+        self.search_edit.setAccessibleName("Поиск по домену или IP")
+        self.search_edit.setToolTip("Перейти к поиску: Ctrl+F")
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.textChanged.connect(lambda _text: self.refresh_table())
         filters.addWidget(self.search_edit, 1)
         self.state_filter = QComboBox()
+        self.state_filter.setAccessibleName("Фильтр по состоянию записи")
         self.state_filter.addItem("Все записи", "")
         self.state_filter.addItem("Включённые", "enabled")
         self.state_filter.addItem("Отключённые", "disabled")
         self.state_filter.currentIndexChanged.connect(lambda _index: self.refresh_table())
         filters.addWidget(self.state_filter)
         self.group_filter = QComboBox()
+        self.group_filter.setAccessibleName("Фильтр по группе")
         self.group_filter.currentIndexChanged.connect(lambda _index: self.refresh_table())
         filters.addWidget(self.group_filter)
         self.source_filter = QComboBox()
+        self.source_filter.setAccessibleName("Фильтр по источнику")
         self.source_filter.currentIndexChanged.connect(lambda _index: self.refresh_table())
         filters.addWidget(self.source_filter)
         root.addLayout(filters)
@@ -1993,6 +2027,10 @@ class HostsApp(QMainWindow):
 
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(["Включено", "Домен", "Активный IP", "Происхождение", "Всего IP"])
+        self.table.setAccessibleName("Записи hosts по группам")
+        self.table.setAccessibleDescription(
+            "Строки доменов поддерживают множественный выбор; внутри доступны переключатель и выбор активного IP"
+        )
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -2026,15 +2064,57 @@ class HostsApp(QMainWindow):
         footer.addWidget(self.hosts_status)
         footer.addStretch()
         preview = QPushButton("Предпросмотр")
+        preview.setToolTip("Открыть предпросмотр изменений hosts (Ctrl+P)")
         preview.clicked.connect(self.preview_hosts)
         footer.addWidget(preview)
         save = QPushButton("Сохранить в hosts")
         save.setObjectName("primary")
+        save.setToolTip("Проверить и сохранить изменения в hosts (Ctrl+S)")
         save.clicked.connect(self.save_managed_block)
         footer.addWidget(save)
         root.addLayout(footer)
         self.update_selection_actions()
         self.refresh_hosts_status()
+        self.setup_shortcuts()
+
+    def setup_shortcuts(self) -> None:
+        self._shortcuts: list[QShortcut] = []
+
+        def register(
+            sequence: str,
+            callback: Callable[[], None],
+            *,
+            parent: QWidget | None = None,
+            context: Qt.ShortcutContext = Qt.ShortcutContext.WindowShortcut,
+        ) -> None:
+            shortcut = QShortcut(QKeySequence(sequence), parent or self)
+            shortcut.setContext(context)
+            shortcut.activated.connect(callback)
+            self._shortcuts.append(shortcut)
+
+        register("Ctrl+N", self.add_entry)
+        register("Ctrl+I", self.import_entries)
+        register("Ctrl+F", self.focus_search)
+        register("Ctrl+P", self.preview_hosts)
+        register("Ctrl+S", self.save_managed_block)
+        register("Ctrl+,", self.manage_settings)
+        register("F5", self.reload)
+        register(
+            "Delete",
+            self.delete_entry,
+            parent=self.table,
+            context=Qt.ShortcutContext.WidgetShortcut,
+        )
+        register(
+            "Escape",
+            self.table.clearSelection,
+            parent=self.table,
+            context=Qt.ShortcutContext.WidgetShortcut,
+        )
+
+    def focus_search(self) -> None:
+        self.search_edit.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.search_edit.selectAll()
 
     def refresh_filter_options(self) -> None:
         def replace_options(
@@ -2105,12 +2185,14 @@ class HostsApp(QMainWindow):
             is_collapsed = group.id in self._collapsed_group_ids
             collapse.setText("▸" if is_collapsed else "▾")
             collapse.setToolTip("Развернуть группу" if is_collapsed else "Свернуть группу")
-            collapse.setAccessibleName(collapse.toolTip())
+            collapse.setAccessibleName(f"{collapse.toolTip()} {group.name}")
             collapse.clicked.connect(lambda _checked=False, group_id=group.id: self.toggle_group_collapsed(group_id))
             group_layout.addWidget(collapse)
             group_check = QCheckBox()
             group_check.setChecked(group.enabled)
             group_check.setToolTip("Включить или исключить группу из hosts, не меняя отдельные записи")
+            group_check.setAccessibleName(f"Включить группу {group.name} в hosts")
+            group_check.setAccessibleDescription(group_check.toolTip())
             group_check.stateChanged.connect(lambda state, group_id=group.id: self.set_group_enabled(group_id, state))
             group_layout.addWidget(group_check)
             group_label = QLabel(group.name)
@@ -2132,7 +2214,9 @@ class HostsApp(QMainWindow):
 
                 check = QCheckBox()
                 check.setChecked(entry.enabled)
-                check.setToolTip("Включить или отключить запись")
+                check.setToolTip(f"Включить или отключить запись {domain}")
+                check.setAccessibleName(f"Включить домен {domain} в hosts")
+                check.setAccessibleDescription(check.toolTip())
                 check.stateChanged.connect(lambda state, name=domain: self.set_enabled(name, state))
                 check_cell = QWidget()
                 check_cell.setStyleSheet("background: transparent;")
@@ -2154,6 +2238,8 @@ class HostsApp(QMainWindow):
                 combo.addItems(entry.ips)
                 combo.setCurrentText(entry.selected_ip)
                 combo.setToolTip("\n".join(entry.ips))
+                combo.setAccessibleName(f"Активный IP для домена {domain}")
+                combo.setAccessibleDescription(f"Доступно IP-адресов: {len(entry.ips)}")
                 combo.currentTextChanged.connect(lambda ip, name=domain: self.set_selected_ip(name, ip))
                 self.table.setCellWidget(row, 2, combo)
 

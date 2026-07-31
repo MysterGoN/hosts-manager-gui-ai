@@ -110,6 +110,29 @@ instead of requiring a modal dialog to be dismissed. Dangerous confirmations
 use explicit actions such as Delete records or Close without applying rather
 than ambiguous Yes/No buttons.
 
+## Keyboard and accessibility
+
+Primary keyboard shortcuts:
+
+- `Ctrl+N` — add a record;
+- `Ctrl+I` — open Import;
+- `Ctrl+F` — focus Search;
+- `Ctrl+P` — open Preview;
+- `Ctrl+S` — review and save to `hosts`;
+- `Ctrl+,` — open Settings;
+- `F5` — reload data from disk;
+- `Delete` and `Escape` in the table — delete selected records or clear selection;
+- `F7` / `Shift+F7` in the diff — navigate to the next or previous change.
+
+Interactive controls have a prominent keyboard focus outline. State is not
+represented by color alone: the diff uses `+`, `−`, `≈`, and `•` markers, while
+checkboxes retain their native check mark. Compound table controls have
+contextual accessible names for screen readers.
+
+Run `make check-ui-scaling` to verify the main window and dialogs at 100%, 125%,
+150%, and 200% scaling. The same check runs in the GitHub Actions build matrix on
+Linux, Windows, and macOS.
+
 ## Checks
 
 ```bash
