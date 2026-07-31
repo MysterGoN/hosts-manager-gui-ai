@@ -47,18 +47,34 @@ In development mode, logs are written only to stdout by default. In the packaged
 application, the console is disabled and JSON logs are written to the rotating
 `hmg.log` file.
 
+## Import
+
+The Import window accepts TXT `domain IP` pairs, CSV/TSV with `domain` and
+`ip`/`ips` columns, and JSON arrays of objects. Data can be pasted, selected with
+the file dialog, or dropped onto the input area. Before applying an import, the
+window shows the number of recognized domains and domain/IP relationships.
+TXT/CSV/TSV errors include a line number, while JSON syntax errors include a line
+and column.
+
 ## URL sources
 
-The URL Sources window can store multiple HTTP/HTTPS addresses and define their
-application order. Standard hosts format (`IP domain`), CSV/TSV, JSON, and
-`domain IP` format are supported.
+The Sources window can store multiple HTTP/HTTPS addresses, enable them, and
+define their application order. Source management is separate from data loading:
+use Load from URL in the main window to run an operation. Standard hosts format
+(`IP domain`), CSV/TSV, JSON, and `domain IP` format are supported.
 
 - Load New only adds source data.
 - Synchronize also removes relationships that disappeared from a source.
 - Replace Entirely builds the list only from enabled sources.
 
-Source-list changes are applied with Save or one of the loading actions. Cancel
-closes the window without changing the configured sources.
+Sources are loaded sequentially, and the operation can be canceled between
+sources. After loading, the application shows a separate result or error for
+every URL and an overall change preview. Local state changes only after explicit
+confirmation. A failed source is skipped without removing its previous
+relationships; Replace Entirely is blocked if any source fails.
+
+Source-list changes are applied with Save. Cancel closes the window without
+changing the configured sources.
 The origin of every domain/IP pair is tracked separately in `sources.json`.
 Manual records and their Enabled state are preserved during synchronization.
 Every URL-source action updates only the application's internal state. The system

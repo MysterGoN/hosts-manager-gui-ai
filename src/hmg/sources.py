@@ -36,6 +36,38 @@ class PairOrigin:
 Origins = dict[PairKey, PairOrigin]
 
 
+@dataclass
+class SourceFetchResult:
+    source: UrlSource
+    entries: dict[str, HostEntry] | None = None
+    error: str | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.entries is not None and self.error is None
+
+
+@dataclass
+class SourceChangeSummary:
+    added_domains: list[str]
+    removed_domains: list[str]
+    added_pairs: list[PairKey]
+    removed_pairs: list[PairKey]
+    changed_origins: list[PairKey]
+
+    @property
+    def has_changes(self) -> bool:
+        return any(
+            (
+                self.added_domains,
+                self.removed_domains,
+                self.added_pairs,
+                self.removed_pairs,
+                self.changed_origins,
+            )
+        )
+
+
 def sources_state_path() -> Path:
     return state_path().with_name("sources.json")
 
@@ -214,6 +246,60 @@ def replace_from_sources(
     for source, incoming in source_entries:
         entries, origins = apply_source(entries, origins, source, incoming, remove_missing=True)
     return entries, origins
+
+
+def prepare_sources_update(
+    entries: dict[str, HostEntry],
+    origins: Origins,
+    results: list[SourceFetchResult],
+    action: str,
+) -> tuple[dict[str, HostEntry], Origins]:
+    if action not in {"update", "sync", "replace"}:
+        raise ValueError(f"Неизвестный режим URL-операции: {action}")
+    failed = [result for result in results if not result.succeeded]
+    if action == "replace" and failed:
+        raise ValueError("Полная замена недоступна, пока хотя бы один источник завершился с ошибкой")
+
+    fetched = [(result.source, result.entries) for result in results if result.succeeded and result.entries is not None]
+    if action == "replace":
+        return replace_from_sources(fetched)
+
+    candidate_entries = clone_entries(entries)
+    candidate_origins = normalize_origins(candidate_entries, origins)
+    for source, incoming in fetched:
+        candidate_entries, candidate_origins = apply_source(
+            candidate_entries,
+            candidate_origins,
+            source,
+            incoming,
+            remove_missing=action == "sync",
+        )
+    return candidate_entries, candidate_origins
+
+
+def summarize_source_changes(
+    before_entries: dict[str, HostEntry],
+    before_origins: Origins,
+    after_entries: dict[str, HostEntry],
+    after_origins: Origins,
+) -> SourceChangeSummary:
+    before_pairs = {(domain, ip) for domain, entry in before_entries.items() for ip in entry.ips}
+    after_pairs = {(domain, ip) for domain, entry in after_entries.items() for ip in entry.ips}
+    common_pairs = before_pairs & after_pairs
+
+    def origin_state(origins: Origins, pair: PairKey) -> tuple[bool, frozenset[str]]:
+        origin = origins.get(pair, PairOrigin(manual=True))
+        return origin.manual, frozenset(origin.source_ids)
+
+    return SourceChangeSummary(
+        added_domains=sorted(set(after_entries) - set(before_entries)),
+        removed_domains=sorted(set(before_entries) - set(after_entries)),
+        added_pairs=sorted(after_pairs - before_pairs),
+        removed_pairs=sorted(before_pairs - after_pairs),
+        changed_origins=sorted(
+            pair for pair in common_pairs if origin_state(before_origins, pair) != origin_state(after_origins, pair)
+        ),
+    )
 
 
 def parse_url_source_text(text: str) -> dict[str, HostEntry]:

@@ -616,19 +616,25 @@ def parse_import_text(text: str) -> dict[str, HostEntry]:
 
 
 def parse_json_import_text(text: str) -> dict[str, HostEntry]:
-    payload = json.loads(text)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Строка {exc.lineno}, колонка {exc.colno}: некорректный JSON") from exc
     if not isinstance(payload, list):
         raise ValueError("JSON import must be an array of objects")
 
     entries: dict[str, HostEntry] = {}
-    for item in payload:
+    for index, item in enumerate(payload, start=1):
         if not isinstance(item, dict):
-            raise ValueError("JSON import items must be objects")
+            raise ValueError(f"Элемент JSON {index}: ожидается объект")
         domain_raw = item.get("domain")
         ip_raw = item.get("ip", item.get("ips"))
         if not isinstance(domain_raw, str) or not isinstance(ip_raw, str):
-            raise ValueError(f"Bad JSON import item: {item}")
-        add_import_row(entries, domain_raw, ip_raw)
+            raise ValueError(f"Элемент JSON {index}: нужны строковые поля domain и ip/ips")
+        try:
+            add_import_row(entries, domain_raw, ip_raw)
+        except ValueError as exc:
+            raise ValueError(f"Элемент JSON {index}: {exc}") from exc
     return entries
 
 
@@ -639,44 +645,55 @@ def parse_delimited_import_text(text: str) -> dict[str, HostEntry]:
     except csv.Error:
         dialect = None
 
-    rows = list(csv.reader(text.splitlines(), dialect)) if dialect else split_whitespace_rows(text)
+    rows: list[tuple[int, list[str]]] = []
+    if dialect:
+        reader = csv.reader(text.splitlines(), dialect)
+        previous_line = 0
+        for row in reader:
+            rows.append((previous_line + 1, row))
+            previous_line = reader.line_num
+    else:
+        rows = split_whitespace_rows(text)
     if not rows:
         raise ValueError("Import text contains no rows")
 
-    header = [c.strip().lower() for c in rows[0]]
+    header = [c.strip().lower() for c in rows[0][1]]
     has_header = "domain" in header and ("ip" in header or "ips" in header)
 
-    data_rows: list[tuple[str, str]] = []
+    data_rows: list[tuple[int, str, str]] = []
     if has_header:
         domain_idx = header.index("domain")
         ip_idx = header.index("ip") if "ip" in header else header.index("ips")
-        for row in rows[1:]:
+        for line_number, row in rows[1:]:
             if not row or all(not c.strip() for c in row):
                 continue
             if len(row) <= max(domain_idx, ip_idx):
-                raise ValueError(f"Bad import row: {row}")
-            data_rows.append((row[domain_idx], row[ip_idx]))
+                raise ValueError(f"Строка {line_number}: не хватает столбцов domain и ip/ips")
+            data_rows.append((line_number, row[domain_idx], row[ip_idx]))
     else:
-        for row in rows:
+        for line_number, row in rows:
             if not row or all(not c.strip() for c in row):
                 continue
             if len(row) < 2:
-                raise ValueError(f"Bad import row without header: {row}")
-            data_rows.append((row[0], row[1]))
+                raise ValueError(f"Строка {line_number}: ожидаются домен и IP")
+            data_rows.append((line_number, row[0], row[1]))
 
     entries: dict[str, HostEntry] = {}
-    for domain_raw, ips_raw in data_rows:
-        add_import_row(entries, domain_raw, ips_raw)
+    for line_number, domain_raw, ips_raw in data_rows:
+        try:
+            add_import_row(entries, domain_raw, ips_raw)
+        except ValueError as exc:
+            raise ValueError(f"Строка {line_number}: {exc}") from exc
     return entries
 
 
-def split_whitespace_rows(text: str) -> list[list[str]]:
-    rows: list[list[str]] = []
-    for line in text.splitlines():
+def split_whitespace_rows(text: str) -> list[tuple[int, list[str]]]:
+    rows: list[tuple[int, list[str]]] = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
         stripped = line.strip()
         if not stripped:
             continue
-        rows.append(re.split(r"\s+", stripped, maxsplit=1))
+        rows.append((line_number, re.split(r"\s+", stripped, maxsplit=1)))
     return rows
 
 

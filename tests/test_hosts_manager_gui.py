@@ -282,6 +282,16 @@ def test_parse_import_text_supports_json_array() -> None:
     assert entries["example.test"].ips == ["127.0.0.1"]
 
 
+def test_parse_import_text_reports_invalid_delimited_line() -> None:
+    with pytest.raises(ValueError, match=r"Строка 2: .*Invalid IP address"):
+        hmg.parse_import_text("example.test 127.0.0.1\nbroken.test not-an-ip\n")
+
+
+def test_parse_import_text_reports_invalid_json_position() -> None:
+    with pytest.raises(ValueError, match=r"Строка 2, колонка"):
+        hmg.parse_import_text('[\n  {"domain": "example.test", "ip": }\n]')
+
+
 def test_merge_entries_keeps_existing_state_and_adds_new_ips() -> None:
     base = {
         "example.test": hmg.HostEntry(

@@ -7,11 +7,13 @@ import signal
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, QPoint, QSignalBlocker, Qt, QTimer, QUrl
+from PySide6.QtCore import QModelIndex, QPoint, QSignalBlocker, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QCloseEvent,
     QColor,
     QDesktopServices,
+    QDragEnterEvent,
+    QDropEvent,
     QFont,
     QFontDatabase,
     QPainter,
@@ -92,6 +94,8 @@ from hmg.settings import (
 from hmg.sources import (
     Origins,
     PairOrigin,
+    SourceChangeSummary,
+    SourceFetchResult,
     UrlSource,
     apply_source,
     clone_entries,
@@ -99,9 +103,10 @@ from hmg.sources import (
     load_sources_state,
     mark_domain_manual,
     normalize_origins,
+    prepare_sources_update,
     remove_domain_origins,
-    replace_from_sources,
     save_sources_state,
+    summarize_source_changes,
     validate_source_url,
 )
 
@@ -764,12 +769,37 @@ class EntryDialog(QDialog):
         self.accept()
 
 
+class ImportDropTextEdit(QTextEdit):
+    file_dropped = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        urls = event.mimeData().urls()
+        if len(urls) == 1 and urls[0].isLocalFile():
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        urls = event.mimeData().urls()
+        if len(urls) == 1 and urls[0].isLocalFile():
+            self.file_dropped.emit(urls[0].toLocalFile())
+            event.acceptProposedAction()
+            return
+        super().dropEvent(event)
+
+
 class ImportDialog(QDialog):
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
         self.result_data: tuple[str, dict[str, HostEntry]] | None = None
+        self.parsed_entries: dict[str, HostEntry] | None = None
         self.setWindowTitle("Импорт записей")
-        self.resize(760, 580)
+        self.setMinimumSize(720, 620)
+        self.resize(800, 680)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
@@ -787,6 +817,16 @@ class ImportDialog(QDialog):
         mode_layout.addStretch()
         layout.addWidget(mode_box)
 
+        formats = QGroupBox("Поддерживаемые форматы")
+        formats_layout = QVBoxLayout(formats)
+        formats_hint = QLabel(
+            'TXT: domain IP · CSV/TSV: столбцы domain и ip/ips · JSON: [{"domain": "example.local", "ip": "127.0.0.1"}]'
+        )
+        formats_hint.setWordWrap(True)
+        formats_hint.setObjectName("hint")
+        formats_layout.addWidget(formats_hint)
+        layout.addWidget(formats)
+
         label_row = QHBoxLayout()
         label_row.addWidget(QLabel("Данные для импорта"))
         label_row.addStretch()
@@ -794,15 +834,32 @@ class ImportDialog(QDialog):
         load_button.clicked.connect(self.load_file)
         label_row.addWidget(load_button)
         layout.addLayout(label_row)
-        self.import_text = QTextEdit()
+        self.import_text = ImportDropTextEdit()
         self.import_text.setFont(monospace_font())
-        self.import_text.setPlaceholderText("example.local  127.0.0.1")
+        self.import_text.setPlaceholderText("Перетащите сюда .txt, .csv, .tsv или .json\n\nexample.local  127.0.0.1")
+        self.import_text.file_dropped.connect(self.load_path)
         layout.addWidget(self.import_text, 1)
+
+        self.import_status = QLabel("Добавьте данные или перетащите файл")
+        self.import_status.setWordWrap(True)
+        self.import_status.setObjectName("hint")
+        layout.addWidget(self.import_status)
 
         buttons = dialog_buttons(self, "Импортировать")
         buttons.accepted.disconnect()
         buttons.accepted.connect(self.parse_and_accept)
+        self.import_button = next(
+            button
+            for button in buttons.buttons()
+            if buttons.buttonRole(button) == QDialogButtonBox.ButtonRole.AcceptRole
+        )
+        self.import_button.setEnabled(False)
         layout.addWidget(buttons)
+        self.validation_timer = QTimer(self)
+        self.validation_timer.setSingleShot(True)
+        self.validation_timer.setInterval(250)
+        self.validation_timer.timeout.connect(self.refresh_import_stats)
+        self.import_text.textChanged.connect(self.validation_timer.start)
 
     def load_file(self) -> None:
         path, _filter = QFileDialog.getOpenFileName(
@@ -813,22 +870,42 @@ class ImportDialog(QDialog):
         )
         if not path:
             return
+        self.load_path(path)
+
+    def load_path(self, path: str) -> None:
         logger.info("import_file_selected", path=path)
         try:
             self.import_text.setPlainText(Path(path).read_text(encoding="utf-8-sig"))
         except Exception as exc:
             logger.warning("import_file_read_failed", path=path, error=str(exc))
-            QMessageBox.critical(self, APP_NAME, f"Не удалось прочитать файл:\n{exc}")
+            self.parsed_entries = None
+            self.import_button.setEnabled(False)
+            self.import_status.setStyleSheet("color: #FF9A9A;")
+            self.import_status.setText(f"Не удалось прочитать файл: {exc}")
 
-    def parse_and_accept(self) -> None:
+    def refresh_import_stats(self) -> None:
         try:
             entries = parse_import_text(self.import_text.toPlainText())
         except Exception as exc:
-            QMessageBox.critical(self, APP_NAME, f"Импорт не удался:\n{exc}")
+            self.parsed_entries = None
+            self.import_button.setEnabled(False)
+            self.import_status.setStyleSheet("color: #FF9A9A;")
+            self.import_status.setText(f"Ошибка: {exc}")
+            return
+        domains_count = len(entries)
+        pairs_count = sum(len(entry.ips) for entry in entries.values())
+        self.parsed_entries = entries
+        self.import_button.setEnabled(True)
+        self.import_status.setStyleSheet("color: #8ED6A8;")
+        self.import_status.setText(f"Распознано доменов: {domains_count} · связей домен/IP: {pairs_count}")
+
+    def parse_and_accept(self) -> None:
+        self.refresh_import_stats()
+        if self.parsed_entries is None:
             return
         mode = "merge" if self.merge_radio.isChecked() else "replace"
-        self.result_data = (mode, entries)
-        logger.info("import_dialog_accepted", mode=mode, entries_count=len(entries))
+        self.result_data = (mode, self.parsed_entries)
+        logger.info("import_dialog_accepted", mode=mode, entries_count=len(self.parsed_entries))
         self.accept()
 
 
@@ -916,18 +993,17 @@ class SourcesDialog(QDialog):
     def __init__(self, parent: QWidget, sources: list[UrlSource]) -> None:
         super().__init__(parent)
         self.sources = [UrlSource(source.name, source.url, source.enabled, source.id) for source in sources]
-        self.action: str | None = None
-        self.setWindowTitle("URL-источники")
+        self.setWindowTitle("Управление URL-источниками")
         self.resize(900, 540)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
-        title = QLabel("URL-источники")
+        title = QLabel("Управление URL-источниками")
         title.setObjectName("sectionTitle")
         layout.addWidget(title)
         hint = QLabel(
-            "Активные источники обрабатываются последовательно сверху вниз. "
-            "Изменяется только внутреннее состояние — файл hosts сохраняется отдельно."
+            "Добавляйте, отключайте и меняйте порядок источников. "
+            "Загрузка данных запускается отдельно из главного окна."
         )
         hint.setWordWrap(True)
         hint.setObjectName("hint")
@@ -968,28 +1044,7 @@ class SourcesDialog(QDialog):
         edit_row.addStretch()
         layout.addLayout(edit_row)
 
-        actions = QHBoxLayout()
-        cancel = QPushButton("Отмена")
-        cancel.clicked.connect(self.reject)
-        actions.addWidget(cancel)
-        save = QPushButton("Сохранить")
-        save.clicked.connect(self.accept)
-        actions.addWidget(save)
-        actions.addStretch()
-        update = QPushButton("Загрузить новые")
-        update.setToolTip("Добавить новые данные во внутреннее состояние, ничего не удаляя")
-        update.clicked.connect(lambda: self.choose_action("update"))
-        actions.addWidget(update)
-        sync = QPushButton("Синхронизировать")
-        sync.setObjectName("primary")
-        sync.setToolTip("Синхронизировать внутреннее состояние; файл hosts не изменяется")
-        sync.clicked.connect(lambda: self.choose_action("sync"))
-        actions.addWidget(sync)
-        replace = QPushButton("Заменить целиком")
-        replace.setObjectName("danger")
-        replace.clicked.connect(lambda: self.choose_action("replace"))
-        actions.addWidget(replace)
-        layout.addLayout(actions)
+        layout.addWidget(dialog_buttons(self, "Сохранить"))
         self.refresh_table()
 
     def refresh_table(self) -> None:
@@ -1067,23 +1122,173 @@ class SourcesDialog(QDialog):
         self.refresh_table()
         self.table.selectRow(new_index)
 
-    def choose_action(self, action: str) -> None:
-        if not any(source.enabled for source in self.sources):
-            QMessageBox.warning(self, APP_NAME, "Включите хотя бы один источник")
-            return
-        if action == "replace":
-            answer = QMessageBox.warning(
-                self,
-                APP_NAME,
-                "Текущий внутренний список будет полностью заменён данными активных источников.\n"
-                "Файл hosts останется без изменений. Продолжить?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-        self.action = action
+
+class SourceSyncDialog(QDialog):
+    def __init__(self, parent: QWidget, sources: list[UrlSource]) -> None:
+        super().__init__(parent)
+        self.result_action: str | None = None
+        self.active_sources = [source for source in sources if source.enabled]
+        self.setWindowTitle("Загрузка из URL")
+        self.setMinimumSize(680, 520)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        title = QLabel("Загрузка из URL")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+        hint = QLabel(
+            "Источники будут загружены по очереди. Перед изменением local state "
+            "вы увидите результат каждого источника и общий preview."
+        )
+        hint.setWordWrap(True)
+        hint.setObjectName("hint")
+        layout.addWidget(hint)
+
+        mode_box = QGroupBox("Режим")
+        mode_layout = QVBoxLayout(mode_box)
+        self.update_radio = QRadioButton("Загрузить новые — ничего не удалять")
+        self.sync_radio = QRadioButton("Синхронизировать — удалить исчезнувшие связи источников")
+        self.replace_radio = QRadioButton("Заменить целиком — оставить только данные активных источников")
+        self.sync_radio.setChecked(True)
+        mode_layout.addWidget(self.update_radio)
+        mode_layout.addWidget(self.sync_radio)
+        mode_layout.addWidget(self.replace_radio)
+        layout.addWidget(mode_box)
+
+        sources_label = QLabel(f"Активные источники: {len(self.active_sources)}")
+        sources_label.setObjectName("subtitle")
+        layout.addWidget(sources_label)
+        source_list = QListWidget()
+        for index, source in enumerate(self.active_sources, start=1):
+            source_list.addItem(f"{index}. {source.name}  —  {source.url}")
+        layout.addWidget(source_list, 1)
+
+        buttons = dialog_buttons(self, "Загрузить и проверить")
+        buttons.accepted.disconnect()
+        buttons.accepted.connect(self.choose_action)
+        layout.addWidget(buttons)
+
+    def choose_action(self) -> None:
+        if self.update_radio.isChecked():
+            self.result_action = "update"
+        elif self.replace_radio.isChecked():
+            self.result_action = "replace"
+        else:
+            self.result_action = "sync"
         self.accept()
+
+
+def format_source_change_summary(summary: SourceChangeSummary) -> list[str]:
+    lines = [
+        f"Новых доменов: {len(summary.added_domains)}",
+        f"Удалённых доменов: {len(summary.removed_domains)}",
+        f"Добавленных связей домен/IP: {len(summary.added_pairs)}",
+        f"Удалённых связей домен/IP: {len(summary.removed_pairs)}",
+        f"Изменений происхождения: {len(summary.changed_origins)}",
+    ]
+    sections: list[tuple[str, list[str]]] = [
+        ("Новые домены", summary.added_domains),
+        ("Удалённые домены", summary.removed_domains),
+        ("Добавленные связи", [f"{domain}  {ip}" for domain, ip in summary.added_pairs]),
+        ("Удалённые связи", [f"{domain}  {ip}" for domain, ip in summary.removed_pairs]),
+        (
+            "Изменённое происхождение",
+            [f"{domain}  {ip}" for domain, ip in summary.changed_origins],
+        ),
+    ]
+    for title, values in sections:
+        if values:
+            lines.extend(["", f"{title}:", *[f"  {value}" for value in values]])
+    if not summary.has_changes:
+        lines.extend(["", "Изменений во внутреннем состоянии нет."])
+    return lines
+
+
+class SourceSyncPreview(QDialog):
+    def __init__(
+        self,
+        parent: QWidget,
+        action: str,
+        results: list[SourceFetchResult],
+        summary: SourceChangeSummary,
+        *,
+        can_apply: bool,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Предпросмотр загрузки из URL")
+        self.setMinimumSize(860, 680)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        title = QLabel("Результаты источников")
+        title.setObjectName("sectionTitle")
+        layout.addWidget(title)
+
+        failed_count = sum(not result.succeeded for result in results)
+        status = QLabel(
+            f"Успешно: {len(results) - failed_count} · С ошибкой: {failed_count} · Режим: {self.action_label(action)}"
+        )
+        status.setObjectName("subtitle")
+        layout.addWidget(status)
+
+        table = QTableWidget(0, 4)
+        table.setHorizontalHeaderLabels(["Источник", "Результат", "Домены", "Подробности"])
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        for row, result in enumerate(results):
+            table.insertRow(row)
+            table.setItem(row, 0, QTableWidgetItem(result.source.name))
+            table.setItem(row, 1, QTableWidgetItem("Готово" if result.succeeded else "Ошибка"))
+            domain_count = len(result.entries) if result.entries is not None else 0
+            table.setItem(row, 2, QTableWidgetItem(str(domain_count) if result.succeeded else "—"))
+            details = result.source.url if result.succeeded else (result.error or "Неизвестная ошибка")
+            detail_item = QTableWidgetItem(details)
+            detail_item.setToolTip(details)
+            table.setItem(row, 3, detail_item)
+        layout.addWidget(table, 1)
+
+        preview_label = QLabel("Изменения local state")
+        preview_label.setObjectName("sectionTitle")
+        layout.addWidget(preview_label)
+        preview = QTextEdit()
+        preview.setReadOnly(True)
+        preview.setFont(monospace_font())
+        preview.setPlainText("\n".join(format_source_change_summary(summary)))
+        layout.addWidget(preview, 1)
+
+        if not can_apply:
+            warning_text = (
+                "Полная замена не может быть применена: исправьте ошибки источников и запустите загрузку повторно."
+                if action == "replace"
+                else "Нет ни одного успешно загруженного источника. Local state не будет изменён."
+            )
+            warning = QLabel(warning_text)
+            warning.setWordWrap(True)
+            warning.setStyleSheet("color: #FF9A9A;")
+            layout.addWidget(warning)
+
+        buttons = QDialogButtonBox()
+        close = buttons.addButton("Закрыть", QDialogButtonBox.ButtonRole.RejectRole)
+        close.clicked.connect(self.reject)
+        apply_button = buttons.addButton("Применить к local state", QDialogButtonBox.ButtonRole.AcceptRole)
+        apply_button.setObjectName("primary")
+        apply_button.setEnabled(can_apply)
+        apply_button.clicked.connect(self.accept)
+        layout.addWidget(buttons)
+
+    @staticmethod
+    def action_label(action: str) -> str:
+        return {
+            "update": "загрузить новые",
+            "sync": "синхронизировать",
+            "replace": "заменить целиком",
+        }[action]
 
 
 class GroupsDialog(QDialog):
@@ -1528,6 +1733,10 @@ class HostsApp(QMainWindow):
         sources_button.setToolTip("Управление URL-источниками")
         sources_button.clicked.connect(self.manage_sources)
         toolbar.addWidget(sources_button)
+        sync_button = QPushButton("Загрузка из URL")
+        sync_button.setToolTip("Загрузить активные источники и проверить изменения")
+        sync_button.clicked.connect(self.synchronize_sources)
+        toolbar.addWidget(sync_button)
         groups_button = QPushButton("Группы")
         groups_button.clicked.connect(self.manage_groups)
         toolbar.addWidget(groups_button)
@@ -2185,50 +2394,102 @@ class HostsApp(QMainWindow):
             self.refresh_table()
         self.persist_internal_state()
 
-        if dialog.action is None:
+    def synchronize_sources(self) -> None:
+        active_sources = [source for source in self.sources if source.enabled]
+        if not active_sources:
+            QMessageBox.warning(
+                self,
+                APP_NAME,
+                "Нет активных URL-источников. Добавьте или включите их в окне «Источники».",
+            )
             return
-        self.apply_sources_action(dialog.action)
+        dialog = SourceSyncDialog(self, self.sources)
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.result_action is None:
+            return
+        self.apply_sources_action(dialog.result_action)
 
     def apply_sources_action(self, action: str) -> None:
         active_sources = [source for source in self.sources if source.enabled]
-        progress = QProgressDialog("Загрузка источников…", "", 0, len(active_sources), self)
+        progress = QProgressDialog("Загрузка источников…", "Отмена", 0, len(active_sources), self)
         progress.setWindowTitle("URL-источники")
-        progress.setCancelButton(None)
         progress.setMinimumDuration(0)
-        fetched: list[tuple[UrlSource, dict[str, HostEntry]]] = []
-        try:
-            for index, source in enumerate(active_sources):
-                progress.setLabelText(f"Загрузка «{source.name}»\n{source.url}")
-                progress.setValue(index)
-                QApplication.processEvents()
-                fetched.append((source, fetch_source(source)))
-            progress.setValue(len(active_sources))
-        except Exception as exc:
-            logger.warning("url_source_fetch_failed", error=str(exc))
-            QMessageBox.critical(self, APP_NAME, f"Не удалось загрузить источники:\n{exc}")
-            return
-        finally:
-            progress.close()
-
-        if action == "replace":
-            candidate_entries, candidate_origins = replace_from_sources(fetched)
-        else:
-            candidate_entries = self.entries
-            candidate_origins = self.origins
-            for source, incoming in fetched:
-                candidate_entries, candidate_origins = apply_source(
-                    candidate_entries,
-                    candidate_origins,
-                    source,
-                    incoming,
-                    remove_missing=action == "sync",
+        progress.setAutoClose(False)
+        results: list[SourceFetchResult] = []
+        canceled = False
+        for index, source in enumerate(active_sources):
+            progress.setLabelText(
+                f"Загрузка «{source.name}»\n{source.url}\n\nОтмена остановит операцию перед следующим источником."
+            )
+            progress.setValue(index)
+            QApplication.processEvents()
+            if progress.wasCanceled():
+                canceled = True
+                break
+            try:
+                entries = fetch_source(source)
+                results.append(SourceFetchResult(source, entries=entries))
+            except Exception as exc:
+                logger.warning(
+                    "url_source_fetch_failed",
+                    source_id=source.id,
+                    source_name=source.name,
+                    error=str(exc),
                 )
+                results.append(SourceFetchResult(source, error=str(exc)))
+            progress.setValue(index + 1)
+            QApplication.processEvents()
+            if progress.wasCanceled():
+                canceled = True
+                break
+        progress.close()
+        if canceled:
+            logger.info("url_sources_fetch_canceled", completed_sources=len(results))
+            QMessageBox.information(
+                self,
+                APP_NAME,
+                "Загрузка отменена. Внутреннее состояние не изменено.",
+            )
+            return
+
+        successful_count = sum(result.succeeded for result in results)
+        can_apply = successful_count > 0 and not (action == "replace" and successful_count != len(results))
+        if can_apply:
+            candidate_entries, candidate_origins = prepare_sources_update(
+                self.entries,
+                self.origins,
+                results,
+                action,
+            )
+        else:
+            candidate_entries = clone_entries(self.entries)
+            candidate_origins = normalize_origins(candidate_entries, self.origins)
+        summary = summarize_source_changes(
+            self.entries,
+            self.origins,
+            candidate_entries,
+            candidate_origins,
+        )
+        preview = SourceSyncPreview(
+            self,
+            action,
+            results,
+            summary,
+            can_apply=can_apply,
+        )
+        if preview.exec() != QDialog.DialogCode.Accepted:
+            return
 
         self.entries = candidate_entries
         self.origins = candidate_origins
         self.refresh_table()
         self.persist_internal_state()
-        logger.info("url_sources_applied", action=action, sources_count=len(fetched), entries_count=len(self.entries))
+        logger.info(
+            "url_sources_applied",
+            action=action,
+            successful_sources=successful_count,
+            failed_sources=len(results) - successful_count,
+            entries_count=len(self.entries),
+        )
         QMessageBox.information(
             self,
             APP_NAME,

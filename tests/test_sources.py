@@ -7,12 +7,15 @@ import hmg.sources as source_module
 from hmg.core import HostEntry
 from hmg.sources import (
     PairOrigin,
+    SourceFetchResult,
     UrlSource,
     apply_source,
     load_sources_state,
     mark_domain_manual,
     parse_url_source_text,
+    prepare_sources_update,
     save_sources_state,
+    summarize_source_changes,
     system_ssl_context,
 )
 from hmg.ui import format_pair_origin
@@ -166,3 +169,56 @@ def test_source_ssl_context_keeps_verification_enabled() -> None:
 
     assert context.verify_mode == ssl.CERT_REQUIRED
     assert context.check_hostname
+
+
+def test_sync_skips_failed_source_without_removing_its_existing_pairs() -> None:
+    failed = UrlSource("Failed", "https://failed.test/hosts", id="failed")
+    ready = UrlSource("Ready", "https://ready.test/hosts", id="ready")
+    entries = {
+        "failed.test": HostEntry("failed.test", ["127.0.0.1"]),
+        "old-ready.test": HostEntry("old-ready.test", ["10.0.0.1"]),
+    }
+    origins = {
+        ("failed.test", "127.0.0.1"): PairOrigin(source_ids={"failed"}),
+        ("old-ready.test", "10.0.0.1"): PairOrigin(source_ids={"ready"}),
+    }
+    results = [
+        SourceFetchResult(failed, error="timeout"),
+        SourceFetchResult(
+            ready,
+            entries={"new-ready.test": HostEntry("new-ready.test", ["10.0.0.2"])},
+        ),
+    ]
+
+    updated, updated_origins = prepare_sources_update(entries, origins, results, "sync")
+
+    assert updated["failed.test"].ips == ["127.0.0.1"]
+    assert "old-ready.test" not in updated
+    assert updated["new-ready.test"].ips == ["10.0.0.2"]
+    assert updated_origins[("failed.test", "127.0.0.1")].source_ids == {"failed"}
+
+
+def test_replace_is_blocked_when_any_source_failed() -> None:
+    source = UrlSource("Failed", "https://failed.test/hosts", id="failed")
+
+    with pytest.raises(ValueError, match="Полная замена недоступна"):
+        prepare_sources_update({}, {}, [SourceFetchResult(source, error="timeout")], "replace")
+
+
+def test_source_change_summary_includes_removed_pairs_and_origin_changes() -> None:
+    before = {"example.test": HostEntry("example.test", ["127.0.0.1", "10.0.0.1"])}
+    after = {"example.test": HostEntry("example.test", ["127.0.0.1", "10.0.0.2"])}
+    before_origins = {
+        ("example.test", "127.0.0.1"): PairOrigin(source_ids={"first"}),
+        ("example.test", "10.0.0.1"): PairOrigin(source_ids={"first"}),
+    }
+    after_origins = {
+        ("example.test", "127.0.0.1"): PairOrigin(source_ids={"first", "second"}),
+        ("example.test", "10.0.0.2"): PairOrigin(source_ids={"second"}),
+    }
+
+    summary = summarize_source_changes(before, before_origins, after, after_origins)
+
+    assert summary.added_pairs == [("example.test", "10.0.0.2")]
+    assert summary.removed_pairs == [("example.test", "10.0.0.1")]
+    assert summary.changed_origins == [("example.test", "127.0.0.1")]
