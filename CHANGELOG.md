@@ -1,3 +1,9 @@
+## v0.2.1 (2026-07-31)
+
+### Fix
+
+- **ui**: use effective minimum size in scaling check
+
 ## v0.2.0 (2026-07-31)
 
 ### Feat
