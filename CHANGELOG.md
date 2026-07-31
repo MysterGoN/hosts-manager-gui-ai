@@ -1,3 +1,9 @@
+## v0.4.0 (2026-07-31)
+
+### Feat
+
+- add in-app update support
+
 ## v0.3.0 (2026-07-31)
 
 ### Feat
