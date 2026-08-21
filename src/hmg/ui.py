@@ -73,6 +73,7 @@ from hmg.core import (
     HostGroup,
     build_preserve_hosts_text,
     detect_import_format,
+    display_domain,
     hosts_path,
     load_state_with_groups,
     merge_entries,
@@ -382,6 +383,7 @@ def entry_matches_filters(
     if (
         normalized_query
         and normalized_query not in entry.domain.casefold()
+        and normalized_query not in display_domain(entry.domain).casefold()
         and not any(normalized_query in ip.casefold() for ip in entry.ips)
     ):
         return False
@@ -641,13 +643,13 @@ class ChangePreview(QDialog):
         added_domains = diff.get("added_domains", [])
         removed_domains = diff.get("removed_domains", [])
         added_ips = diff.get("added_ips", {})
-        lines.extend([f"  + {domain}" for domain in sorted(added_domains)] or ["  — нет"])
+        lines.extend([f"  + {display_domain(domain)}" for domain in sorted(added_domains)] or ["  — нет"])
         lines.extend(["", "Удалённые записи:"])
-        lines.extend([f"  − {domain}" for domain in sorted(removed_domains)] or ["  — нет"])
+        lines.extend([f"  − {display_domain(domain)}" for domain in sorted(removed_domains)] or ["  — нет"])
         lines.extend(["", "IP, добавленные к существующим доменам:"])
         if added_ips:
             for domain in sorted(added_ips):
-                lines.append(f"  {domain}:")
+                lines.append(f"  {display_domain(domain)}:")
                 lines.extend(f"    + {ip}" for ip in added_ips[domain])
         else:
             lines.append("  — нет")
@@ -1010,6 +1012,8 @@ class HelpDialog(QDialog):
               <li>Отключённая запись не записывается в <code>hosts</code>.</li>
               <li>Отключение группы исключает из <code>hosts</code> всю группу, не меняя состояния её записей.</li>
               <li>Для ручного импорта выбирается целевая группа; новые записи из URL попадают в <b>Default</b>.</li>
+              <li>Группы в <code>hosts</code> отмечаются комментариями и разделяются пустой строкой.</li>
+              <li>Кириллические домены видны как Unicode, а в <code>hosts</code> сохраняются как Punycode.</li>
             </ul>
 
             <h2>Импорт и URL-источники</h2>
@@ -1150,7 +1154,7 @@ class EntryDialog(QDialog):
 
         form = QFormLayout()
         form.setVerticalSpacing(12)
-        self.domain_edit = QLineEdit(entry.domain if entry else "")
+        self.domain_edit = QLineEdit(display_domain(entry.domain) if entry else "")
         self.domain_edit.setFont(monospace_font())
         self.domain_edit.setPlaceholderText("example.local")
         self.domain_edit.setAccessibleName("Домен")
@@ -1617,13 +1621,19 @@ def format_source_change_summary(summary: SourceChangeSummary) -> list[str]:
         f"Изменений происхождения: {len(summary.changed_origins)}",
     ]
     sections: list[tuple[str, list[str]]] = [
-        ("Новые домены", summary.added_domains),
-        ("Удалённые домены", summary.removed_domains),
-        ("Добавленные связи", [f"{domain}  {ip}" for domain, ip in summary.added_pairs]),
-        ("Удалённые связи", [f"{domain}  {ip}" for domain, ip in summary.removed_pairs]),
+        ("Новые домены", [display_domain(domain) for domain in summary.added_domains]),
+        ("Удалённые домены", [display_domain(domain) for domain in summary.removed_domains]),
+        (
+            "Добавленные связи",
+            [f"{display_domain(domain)}  {ip}" for domain, ip in summary.added_pairs],
+        ),
+        (
+            "Удалённые связи",
+            [f"{display_domain(domain)}  {ip}" for domain, ip in summary.removed_pairs],
+        ),
         (
             "Изменённое происхождение",
-            [f"{domain}  {ip}" for domain, ip in summary.changed_origins],
+            [f"{display_domain(domain)}  {ip}" for domain, ip in summary.changed_origins],
         ),
     ]
     for title, values in sections:
@@ -2546,7 +2556,7 @@ class HostsApp(QMainWindow):
                         source_id=source_filter,
                     )
                 ),
-                key=lambda item: item[0],
+                key=lambda item: display_domain(item[0]).casefold(),
             )
             if not group_entries and filters_active:
                 continue
@@ -2594,13 +2604,14 @@ class HostsApp(QMainWindow):
             if is_collapsed:
                 continue
             for domain, entry in group_entries:
+                readable_domain = display_domain(domain)
                 row = self.table.rowCount()
                 self.table.insertRow(row)
 
                 check = VisibleCheckBox()
                 check.setChecked(entry.enabled)
-                check.setToolTip(f"Включить или отключить запись {domain}")
-                check.setAccessibleName(f"Включить домен {domain} в hosts")
+                check.setToolTip(f"Включить или отключить запись {readable_domain}")
+                check.setAccessibleName(f"Включить домен {readable_domain} в hosts")
                 check.setAccessibleDescription(check.toolTip())
                 check.stateChanged.connect(lambda state, name=domain: self.set_enabled(name, state))
                 check_cell = QWidget()
@@ -2611,10 +2622,12 @@ class HostsApp(QMainWindow):
                 check_layout.addWidget(check)
                 self.table.setCellWidget(row, 0, check_cell)
 
-                domain_item = QTableWidgetItem(domain)
+                domain_item = QTableWidgetItem(readable_domain)
                 domain_item.setFont(monospace_font(HOSTS_TABLE_FONT_SIZE))
                 domain_item.setData(Qt.ItemDataRole.UserRole, domain)
-                domain_item.setToolTip(domain)
+                domain_item.setToolTip(
+                    readable_domain if readable_domain == domain else f"{readable_domain}\nPunycode: {domain}"
+                )
                 self.table.setItem(row, 1, domain_item)
 
                 combo = QComboBox()
@@ -2623,7 +2636,7 @@ class HostsApp(QMainWindow):
                 combo.addItems(entry.ips)
                 combo.setCurrentText(entry.selected_ip)
                 combo.setToolTip("\n".join(entry.ips))
-                combo.setAccessibleName(f"Активный IP для домена {domain}")
+                combo.setAccessibleName(f"Активный IP для домена {readable_domain}")
                 combo.setAccessibleDescription(f"Доступно IP-адресов: {len(entry.ips)}")
                 combo.currentTextChanged.connect(lambda ip, name=domain: self.set_selected_ip(name, ip))
                 self.table.setCellWidget(row, 2, combo)
@@ -2745,10 +2758,14 @@ class HostsApp(QMainWindow):
         origin_item = self.table.item(index.row(), 3)
         menu = QMenu(self)
         copy_domain = menu.addAction("Копировать домен")
+        readable_domain = display_domain(domain)
+        copy_punycode = menu.addAction("Копировать Punycode") if readable_domain != domain else None
         copy_ip = menu.addAction("Копировать активный IP")
         copy_origin = menu.addAction("Копировать происхождение")
         selected = menu.exec(self.table.viewport().mapToGlobal(position))
         if selected == copy_domain:
+            QApplication.clipboard().setText(readable_domain)
+        elif copy_punycode is not None and selected == copy_punycode:
             QApplication.clipboard().setText(domain)
         elif selected == copy_ip:
             QApplication.clipboard().setText(entry.selected_ip)
@@ -2913,9 +2930,9 @@ class HostsApp(QMainWindow):
             QMessageBox.warning(self, APP_NAME, "Сначала выберите хотя бы один домен")
             return
         if len(domains) == 1:
-            question = f"Удалить {domains[0]}?"
+            question = f"Удалить {display_domain(domains[0])}?"
         else:
-            visible_domains = "\n".join(f"• {domain}" for domain in domains[:8])
+            visible_domains = "\n".join(f"• {display_domain(domain)}" for domain in domains[:8])
             remainder = len(domains) - 8
             if remainder > 0:
                 visible_domains += f"\n• …и ещё {remainder}"

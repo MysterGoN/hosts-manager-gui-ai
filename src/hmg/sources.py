@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 import truststore
 
-from hmg.core import HostEntry, parse_hosts_line, parse_import_text, state_path
+from hmg.core import HostEntry, parse_hosts_line, parse_import_text, state_path, validate_domain
 from hmg.logging import get_logger
 
 logger = get_logger(__name__)
@@ -97,10 +97,16 @@ def load_sources_state() -> tuple[list[UrlSource], Origins]:
         ]
         origins: Origins = {}
         for item in payload.get("origins", []):
-            origins[(str(item["domain"]), str(item["ip"]))] = PairOrigin(
+            pair = (validate_domain(str(item["domain"])), str(item["ip"]))
+            incoming = PairOrigin(
                 manual=bool(item.get("manual", False)),
                 source_ids={str(source_id) for source_id in item.get("source_ids", [])},
             )
+            if pair in origins:
+                origins[pair].manual = origins[pair].manual or incoming.manual
+                origins[pair].source_ids.update(incoming.source_ids)
+            else:
+                origins[pair] = incoming
         return sources, origins
     except Exception as exc:
         logger.warning("sources_state_load_failed", path=str(path), error=str(exc))

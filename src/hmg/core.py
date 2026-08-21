@@ -17,6 +17,8 @@ from datetime import datetime
 from pathlib import Path, PurePath
 from typing import Literal, TypedDict
 
+import idna
+
 from hmg.logging import get_logger
 from hmg.settings import get_settings
 
@@ -64,6 +66,41 @@ def normalize_domain(domain: str) -> str:
     return domain.strip().lower().rstrip(".")
 
 
+def domain_to_ascii(domain: str) -> str:
+    normalized = normalize_domain(domain)
+    labels: list[str] = []
+    for label in normalized.split("."):
+        if label.isascii() and not label.startswith("xn--"):
+            labels.append(label)
+            continue
+        labels.append(idna.encode(label, uts46=True, std3_rules=True).decode("ascii"))
+    return ".".join(labels)
+
+
+def display_domain(domain: str) -> str:
+    """Return a readable Unicode representation without changing the canonical key."""
+    labels: list[str] = []
+    for label in domain.split("."):
+        if not label.lower().startswith("xn--"):
+            labels.append(label)
+            continue
+        try:
+            labels.append(idna.decode(label))
+        except idna.IDNAError:
+            labels.append(label)
+    return ".".join(labels)
+
+
+def domain_sort_key(domain: str) -> tuple[str, ...]:
+    """Sort domains by labels from the top-level domain towards the host label."""
+    return tuple(reversed(display_domain(domain).casefold().split(".")))
+
+
+def host_entry_sort_key(entry: HostEntry) -> tuple[int, int, tuple[str, ...]]:
+    address = ipaddress.ip_address(entry.selected_ip)
+    return address.version, int(address), domain_sort_key(entry.domain)
+
+
 def split_ips(value: str) -> list[str]:
     parts = re.split(r"[;\s]+", value.strip())
     return [p.strip() for p in parts if p.strip()]
@@ -79,9 +116,13 @@ def validate_ip(value: str) -> str:
 
 
 def validate_domain(value: str) -> str:
-    domain = normalize_domain(value)
-    if not domain:
+    normalized = normalize_domain(value)
+    if not normalized:
         raise ValueError("Домен не указан")
+    try:
+        domain = domain_to_ascii(normalized)
+    except idna.IDNAError as exc:
+        raise ValueError(f"Некорректное имя домена или хоста: {value}") from exc
     # hosts can contain local aliases without dots. We allow them.
     if not DOMAIN_RE.match(domain):
         raise ValueError(f"Некорректное имя домена или хоста: {value}")
@@ -376,10 +417,22 @@ def build_managed_block(
         f"# Managed by {APP_NAME}. Edit through the app when possible.",
         f"{GENERATED_AT_PREFIX}{datetime.now().isoformat(timespec='seconds')}",
     ]
-    enabled_groups = None if groups is None else {group.id for group in groups if group.enabled}
-    for entry in sorted(entries.values(), key=lambda x: x.domain):
-        if entry.enabled and (enabled_groups is None or entry.group_id in enabled_groups):
-            lines.append(entry.active_line())
+    group_list = list(groups) if groups is not None else [default_group()]
+    rendered_group = False
+    for group in group_list:
+        if not group.enabled:
+            continue
+        group_entries = [
+            entry for entry in entries.values() if entry.enabled and (entry.group_id == group.id or groups is None)
+        ]
+        if not group_entries:
+            continue
+        if rendered_group:
+            lines.append("")
+        safe_group_name = " ".join(group.name.splitlines())
+        lines.append(f"# Group: {safe_group_name}")
+        lines.extend(entry.active_line() for entry in sorted(group_entries, key=host_entry_sort_key))
+        rendered_group = True
     lines.append(MANAGED_END)
     return "\n".join(lines) + "\n"
 

@@ -154,6 +154,28 @@ def test_sources_and_pair_origins_round_trip_in_separate_state_file(
     assert loaded_origins == origins
 
 
+def test_loading_origins_canonicalizes_unicode_and_punycode_domains(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "sources.json"
+    path.write_text(
+        """{
+          "sources": [],
+          "origins": [
+            {"domain": "пример.рф", "ip": "127.0.0.1", "manual": true},
+            {"domain": "xn--e1afmkfd.xn--p1ai", "ip": "127.0.0.1", "source_ids": ["primary"]}
+          ]
+        }""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(source_module, "sources_state_path", lambda: path)
+
+    _sources, origins = load_sources_state()
+
+    assert origins == {("xn--e1afmkfd.xn--p1ai", "127.0.0.1"): PairOrigin(manual=True, source_ids={"primary"})}
+
+
 def test_pair_origin_label_lists_manual_and_all_known_sources() -> None:
     sources = [
         UrlSource("Primary", "https://primary.test/hosts", id="first"),

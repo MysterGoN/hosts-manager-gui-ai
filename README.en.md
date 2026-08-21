@@ -150,6 +150,12 @@ relationships. Every imported domain, including an existing one, is moved to the
 selected group. TXT/CSV/TSV/hosts errors include a line number, while JSON syntax
 errors include a line and column.
 
+Domain names containing Unicode characters, including Cyrillic (`пример.рф`),
+are accepted in manual entry, imports, and URL sources. They are shown as
+readable Unicode in the interface and stored in canonical Punycode in local
+state and the system `hosts` file. A Unicode name and its matching Punycode are
+treated as the same domain, and search supports both forms.
+
 ## URL sources
 
 The Sources window can store multiple HTTP/HTTPS addresses, enable them, and
@@ -184,16 +190,20 @@ renamed, or moved. A target group is selected for a manual import, while new
 domains from URL sources are placed in `Default`.
 
 A group switch temporarily excludes all its domains from the resulting `hosts`
-file without changing the individual record switches. Groups and disabled records
-do not create comments in `hosts`: the managed block contains only enabled domains
-from enabled groups.
+file without changing the individual record switches. The managed block contains
+only enabled domains from enabled groups. Every non-empty group is marked with a
+`# Group: ...` comment, and adjacent groups are separated by a blank line. Within
+each group, records are sorted first by the numeric IP value (IPv4 before IPv6),
+then, for matching IPs, by domain labels from right to left: top-level domain,
+second-level domain, and so on.
 
 The main list supports domain/IP search, filters by state, group, and source, and
-collapsible groups. Selecting one or more rows enables contextual actions for
-editing, moving, bulk enabling/disabling, and deleting records. The footer status
-shows how many domains are saved in local state but not yet applied to the system
-`hosts` file. Full domain and origin values are available through tooltips and
-context-menu copying.
+collapsible groups. A Unicode domain is shown in readable form, with its Punycode
+available in the tooltip and context menu. Selecting one or more rows enables
+contextual actions for editing, moving, bulk enabling/disabling, and deleting
+records. The footer status shows how many domains are saved in local state but
+not yet applied to the system `hosts` file. Full domain and origin values are
+available through tooltips and context-menu copying.
 
 The `hosts` preview identifies added, removed, modified, and service lines
 separately. `Generated at` changes are excluded from user-facing statistics.

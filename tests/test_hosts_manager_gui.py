@@ -47,6 +47,34 @@ def test_host_entry_normalizes_domain_deduplicates_ips_and_selects_first_ip() ->
     assert entry.selected_ip == "127.0.0.1"
 
 
+def test_host_entry_stores_unicode_domain_as_punycode_and_displays_unicode() -> None:
+    entry = hmg.HostEntry(domain="Пример.РФ.", ips=["127.0.0.1"])
+
+    assert entry.domain == "xn--e1afmkfd.xn--p1ai"
+    assert hmg.display_domain(entry.domain) == "пример.рф"
+
+
+def test_unicode_and_punycode_domains_share_one_canonical_key() -> None:
+    entries = hmg.parse_import_text("пример.рф 127.0.0.1\nxn--e1afmkfd.xn--p1ai 10.0.0.1\n")
+
+    assert list(entries) == ["xn--e1afmkfd.xn--p1ai"]
+    assert entries["xn--e1afmkfd.xn--p1ai"].ips == ["127.0.0.1", "10.0.0.1"]
+
+
+def test_unicode_domain_validation_rejects_invalid_idn() -> None:
+    with pytest.raises(ValueError, match="Некорректное имя домена"):
+        hmg.validate_domain("пример😀.рф")
+    with pytest.raises(ValueError, match="Некорректное имя домена"):
+        hmg.validate_domain("xn--a")
+
+
+def test_unicode_domain_validation_allows_mixed_scripts() -> None:
+    canonical = hmg.validate_domain("раypal.com")
+
+    assert canonical.startswith("xn--")
+    assert hmg.display_domain(canonical) == "раypal.com"
+
+
 def test_host_entry_rejects_empty_ip_list() -> None:
     with pytest.raises(ValueError, match="нужен хотя бы один IP"):
         hmg.HostEntry(domain="example.test", ips=[])
@@ -180,6 +208,40 @@ def test_build_preserve_hosts_text_omits_entries_from_disabled_groups() -> None:
 
     assert "default.test" in rendered
     assert "work.test" not in rendered
+    assert "# Group: Default" in rendered
+    assert "# Group: Work" not in rendered
+
+
+def test_managed_block_groups_and_sorts_entries_by_ip_then_reversed_domain() -> None:
+    groups = [
+        hmg.HostGroup(hmg.DEFAULT_GROUP_ID, hmg.DEFAULT_GROUP_NAME),
+        hmg.HostGroup("work", "Работа"),
+    ]
+    entry_list = [
+        hmg.HostEntry("late.net", ["10.0.0.10"]),
+        hmg.HostEntry("zeta.example.com", ["10.0.0.2"]),
+        hmg.HostEntry("alpha.example.com", ["10.0.0.2"]),
+        hmg.HostEntry("host.alpha.com", ["10.0.0.2"]),
+        hmg.HostEntry("пример.рф", ["127.0.0.1"], group_id="work"),
+    ]
+    entries = {entry.domain: entry for entry in entry_list}
+
+    rendered = hmg.build_managed_block(entries, groups)
+    content_lines = [line for line in rendered.splitlines() if not line.startswith(hmg.GENERATED_AT_PREFIX)]
+
+    assert content_lines == [
+        hmg.MANAGED_START,
+        "# Managed by Hosts Manager GUI. Edit through the app when possible.",
+        "# Group: Default",
+        "10.0.0.2\thost.alpha.com",
+        "10.0.0.2\talpha.example.com",
+        "10.0.0.2\tzeta.example.com",
+        "10.0.0.10\tlate.net",
+        "",
+        "# Group: Работа",
+        "127.0.0.1\txn--e1afmkfd.xn--p1ai",
+        hmg.MANAGED_END,
+    ]
 
 
 def test_state_without_groups_is_migrated_to_default(
@@ -627,6 +689,13 @@ def test_entry_filters_match_domain_ip_state_group_and_source() -> None:
     assert entry_matches_filters(entry, origins, source_id="primary")
     assert entry_matches_filters(entry, origins, source_id=SOURCE_FILTER_MANUAL)
     assert not entry_matches_filters(entry, origins, source_id="secondary")
+
+
+def test_entry_filters_match_unicode_and_punycode_domain_forms() -> None:
+    entry = hmg.HostEntry("пример.рф", ["127.0.0.1"])
+
+    assert entry_matches_filters(entry, {}, query="пример")
+    assert entry_matches_filters(entry, {}, query="xn--e1afmkfd")
 
 
 def test_move_multiple_entries_between_groups() -> None:

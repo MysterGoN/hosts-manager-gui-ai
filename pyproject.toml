@@ -5,6 +5,7 @@ description = "Cross-platform GUI utility for managing hosts records."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "idna>=3.10",
     "platformdirs>=4.5",
     "pyside6>=6.9",
     "truststore>=0.10",
