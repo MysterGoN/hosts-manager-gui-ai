@@ -1,3 +1,13 @@
+## v0.6.0 (2026-08-21)
+
+### Feat
+
+- support IDN domains and grouped hosts output
+
+### Fix
+
+- point releases to renamed repository
+
 ## v0.5.0 (2026-08-21)
 
 ### Feat
