@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$ReleaseBaseUrl = "https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download",
+    [string]$ReleaseBaseUrl = "https://github.com/MysterGoN/hosts-manager-gui-ai/releases/latest/download",
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\HostsManagerGUI"),
     [string]$ArchivePath = "",
     [string]$ChecksumsPath = "",

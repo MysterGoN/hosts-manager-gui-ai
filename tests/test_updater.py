@@ -32,7 +32,7 @@ def release_info(*, assets: dict[str, ReleaseAsset] | None = None) -> ReleaseInf
         version=(0, 4, 0),
         name="v0.4.0",
         notes="Update notes",
-        html_url="https://github.com/MysterGoN/hosts-manager-gui/releases/tag/v0.4.0",
+        html_url="https://github.com/MysterGoN/hosts-manager-gui-ai/releases/tag/v0.4.0",
         assets=assets or {},
     )
 
@@ -76,12 +76,12 @@ def test_parse_release_payload_validates_release_and_assets() -> None:
         "tag_name": "v0.4.0",
         "name": "Version 0.4.0",
         "body": "Notes",
-        "html_url": "https://github.com/MysterGoN/hosts-manager-gui/releases/tag/v0.4.0",
+        "html_url": "https://github.com/MysterGoN/hosts-manager-gui-ai/releases/tag/v0.4.0",
         "assets": [
             {
                 "name": "install-linux.sh",
                 "browser_download_url": (
-                    "https://github.com/MysterGoN/hosts-manager-gui/releases/download/v0.4.0/install-linux.sh"
+                    "https://github.com/MysterGoN/hosts-manager-gui-ai/releases/download/v0.4.0/install-linux.sh"
                 ),
                 "size": 100,
                 "digest": "sha256:" + "a" * 64,
@@ -100,7 +100,7 @@ def test_parse_release_payload_validates_release_and_assets() -> None:
 def test_parse_release_payload_rejects_unexpected_asset_url() -> None:
     payload = {
         "tag_name": "v0.4.0",
-        "html_url": "https://github.com/MysterGoN/hosts-manager-gui/releases/tag/v0.4.0",
+        "html_url": "https://github.com/MysterGoN/hosts-manager-gui-ai/releases/tag/v0.4.0",
         "assets": [
             {
                 "name": "install-linux.sh",

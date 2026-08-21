@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-release_base_url="${HMG_RELEASE_BASE_URL:-https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download}"
+release_base_url="${HMG_RELEASE_BASE_URL:-https://github.com/MysterGoN/hosts-manager-gui-ai/releases/latest/download}"
 install_dir="${HMG_INSTALL_DIR:-${HOME}/.local/bin}"
 applications_dir="${HMG_APPLICATIONS_DIR:-${XDG_DATA_HOME:-${HOME}/.local/share}/applications}"
 archive_name="hosts-manager-gui-linux.tar.gz"

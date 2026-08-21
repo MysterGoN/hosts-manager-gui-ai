@@ -99,7 +99,7 @@ def check_scale(scale: str) -> int:
                 version=(9, 9, 9),
                 name="v9.9.9",
                 notes="- Улучшено обновление\n- Исправлены ошибки",
-                html_url="https://github.com/MysterGoN/hosts-manager-gui/releases/tag/v9.9.9",
+                html_url="https://github.com/MysterGoN/hosts-manager-gui-ai/releases/tag/v9.9.9",
                 assets={},
             ),
             "0.3.0",

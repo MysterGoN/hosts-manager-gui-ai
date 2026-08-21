@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-release_base_url="${HMG_RELEASE_BASE_URL:-https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download}"
+release_base_url="${HMG_RELEASE_BASE_URL:-https://github.com/MysterGoN/hosts-manager-gui-ai/releases/latest/download}"
 applications_dir="${HMG_APPLICATIONS_DIR:-${HOME}/Applications}"
 app_dir="$applications_dir/Hosts Manager GUI.app"
 executable_dir="$app_dir/Contents/MacOS"

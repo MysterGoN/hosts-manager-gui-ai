@@ -20,7 +20,7 @@ from typing import Any
 
 from hmg.sources import system_ssl_context
 
-REPOSITORY = "MysterGoN/hosts-manager-gui"
+REPOSITORY = "MysterGoN/hosts-manager-gui-ai"
 LATEST_RELEASE_API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
 API_VERSION = "2026-03-10"
 MAX_RELEASE_METADATA_BYTES = 1024 * 1024

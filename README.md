@@ -11,7 +11,7 @@
 > [!WARNING]
 > Репозиторий находится в экспериментальном режиме. Pull request'ы пока не
 > рассматриваются и не принимаются. Сообщения об ошибках и предложения можно
-> оставлять в [GitHub Issues](https://github.com/MysterGoN/hosts-manager-gui/issues).
+> оставлять в [GitHub Issues](https://github.com/MysterGoN/hosts-manager-gui-ai/issues).
 
 Desktop-приложение для управления отдельным HMG-блоком в системном файле `hosts`.
 Интерфейс построен на PySide6/Qt и использует тёмную QSS-тему.
@@ -19,7 +19,7 @@ Desktop-приложение для управления отдельным HMG-
 ## Установка готовой сборки
 
 Готовые сборки не требуют Python, `uv` или зависимостей проекта. Установочные
-скрипты из [последнего GitHub Release](https://github.com/MysterGoN/hosts-manager-gui/releases/latest)
+скрипты из [последнего GitHub Release](https://github.com/MysterGoN/hosts-manager-gui-ai/releases/latest)
 сами скачивают нужный архив, проверяют его по `SHA256SUMS`, устанавливают
 приложение, создают ярлык и запускают его. Перед запуском скрипт можно открыть
 в текстовом редакторе и проверить.
@@ -29,7 +29,7 @@ Desktop-приложение для управления отдельным HMG-
 Требуется `glibc 2.39` или новее. Выполните:
 
 ```bash
-curl -fLO https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download/install-linux.sh
+curl -fLO https://github.com/MysterGoN/hosts-manager-gui-ai/releases/latest/download/install-linux.sh
 bash install-linux.sh
 ```
 
@@ -39,7 +39,7 @@ bash install-linux.sh
 Удаление:
 
 ```bash
-curl -fLO https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download/uninstall-linux.sh
+curl -fLO https://github.com/MysterGoN/hosts-manager-gui-ai/releases/latest/download/uninstall-linux.sh
 bash uninstall-linux.sh
 ```
 
@@ -48,7 +48,7 @@ bash uninstall-linux.sh
 Откройте PowerShell и выполните:
 
 ```powershell
-$url = "https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download"
+$url = "https://github.com/MysterGoN/hosts-manager-gui-ai/releases/latest/download"
 Invoke-WebRequest "$url/install-windows.ps1" -OutFile .\install-windows.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1
 ```
@@ -61,7 +61,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1
 Удаление:
 
 ```powershell
-$url = "https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download"
+$url = "https://github.com/MysterGoN/hosts-manager-gui-ai/releases/latest/download"
 Invoke-WebRequest "$url/uninstall-windows.ps1" -OutFile .\uninstall-windows.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\uninstall-windows.ps1
 ```
@@ -71,7 +71,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\uninstall-windows.ps1
 Для Mac с процессором Apple Silicon (`arm64`) выполните в Terminal:
 
 ```bash
-curl -fLO https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download/install-macos.sh
+curl -fLO https://github.com/MysterGoN/hosts-manager-gui-ai/releases/latest/download/install-macos.sh
 bash install-macos.sh
 ```
 
@@ -82,7 +82,7 @@ bash install-macos.sh
 Удаление:
 
 ```bash
-curl -fLO https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download/uninstall-macos.sh
+curl -fLO https://github.com/MysterGoN/hosts-manager-gui-ai/releases/latest/download/uninstall-macos.sh
 bash uninstall-macos.sh
 ```
 

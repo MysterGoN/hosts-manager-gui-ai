@@ -11,7 +11,7 @@ English | [Русский](README.md)
 > [!WARNING]
 > This repository is experimental. Pull requests are not currently reviewed or
 > accepted. Bug reports and suggestions are welcome in
-> [GitHub Issues](https://github.com/MysterGoN/hosts-manager-gui/issues).
+> [GitHub Issues](https://github.com/MysterGoN/hosts-manager-gui-ai/issues).
 
 A desktop application for managing a dedicated HMG block in the system `hosts`
 file. The interface is built with PySide6/Qt and uses a dark QSS theme.
@@ -19,7 +19,7 @@ file. The interface is built with PySide6/Qt and uses a dark QSS theme.
 ## Installing a release
 
 Release builds do not require Python, `uv`, or the project dependencies. The
-installer scripts from the [latest GitHub Release](https://github.com/MysterGoN/hosts-manager-gui/releases/latest)
+installer scripts from the [latest GitHub Release](https://github.com/MysterGoN/hosts-manager-gui-ai/releases/latest)
 download the correct archive, verify it against `SHA256SUMS`, install the
 application, create a shortcut, and launch it. You can inspect each script in a
 text editor before running it.
@@ -29,7 +29,7 @@ text editor before running it.
 `glibc 2.39` or newer is required. Run:
 
 ```bash
-curl -fLO https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download/install-linux.sh
+curl -fLO https://github.com/MysterGoN/hosts-manager-gui-ai/releases/latest/download/install-linux.sh
 bash install-linux.sh
 ```
 
@@ -39,7 +39,7 @@ menu. Writing `/etc/hosts` requires `pkexec` from PolicyKit.
 To uninstall:
 
 ```bash
-curl -fLO https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download/uninstall-linux.sh
+curl -fLO https://github.com/MysterGoN/hosts-manager-gui-ai/releases/latest/download/uninstall-linux.sh
 bash uninstall-linux.sh
 ```
 
@@ -48,7 +48,7 @@ bash uninstall-linux.sh
 Open PowerShell and run:
 
 ```powershell
-$url = "https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download"
+$url = "https://github.com/MysterGoN/hosts-manager-gui-ai/releases/latest/download"
 Invoke-WebRequest "$url/install-windows.ps1" -OutFile .\install-windows.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1
 ```
@@ -61,7 +61,7 @@ the application writes the system `hosts` file.
 To uninstall:
 
 ```powershell
-$url = "https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download"
+$url = "https://github.com/MysterGoN/hosts-manager-gui-ai/releases/latest/download"
 Invoke-WebRequest "$url/uninstall-windows.ps1" -OutFile .\uninstall-windows.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\uninstall-windows.ps1
 ```
@@ -71,7 +71,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\uninstall-windows.ps1
 On a Mac with Apple Silicon (`arm64`), run the following in Terminal:
 
 ```bash
-curl -fLO https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download/install-macos.sh
+curl -fLO https://github.com/MysterGoN/hosts-manager-gui-ai/releases/latest/download/install-macos.sh
 bash install-macos.sh
 ```
 
@@ -82,7 +82,7 @@ Privacy & Security → Open Anyway.
 To uninstall:
 
 ```bash
-curl -fLO https://github.com/MysterGoN/hosts-manager-gui/releases/latest/download/uninstall-macos.sh
+curl -fLO https://github.com/MysterGoN/hosts-manager-gui-ai/releases/latest/download/uninstall-macos.sh
 bash uninstall-macos.sh
 ```
 
