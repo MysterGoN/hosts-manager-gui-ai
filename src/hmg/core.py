@@ -15,7 +15,7 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path, PurePath
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 from hmg.logging import get_logger
 from hmg.settings import get_settings
@@ -36,6 +36,9 @@ class EntryDiff(TypedDict):
     added_domains: list[str]
     added_ips: dict[str, list[str]]
     removed_domains: list[str]
+
+
+ImportFormat = Literal["json", "hosts", "delimited"]
 
 
 class ElevatedWriteError(RuntimeError):
@@ -531,6 +534,7 @@ def run_elevated_write_windows(path: Path, temp_path: Path, backup: Path) -> Non
 def merge_entries(
     base: dict[str, HostEntry],
     incoming: dict[str, HostEntry],
+    target_group_id: str | None = None,
 ) -> tuple[dict[str, HostEntry], EntryDiff]:
     result = {
         domain: HostEntry(e.domain, list(e.ips), e.selected_ip, e.enabled, e.group_id) for domain, e in base.items()
@@ -540,13 +544,21 @@ def merge_entries(
 
     for domain, imported in incoming.items():
         if domain not in result:
-            result[domain] = HostEntry(imported.domain, list(imported.ips), imported.selected_ip, True)
+            result[domain] = HostEntry(
+                imported.domain,
+                list(imported.ips),
+                imported.selected_ip,
+                True,
+                target_group_id or imported.group_id,
+            )
             added_domains.append(domain)
         else:
             added = result[domain].add_ips(imported.ips)
             if added:
                 added_ips[domain] = added
             # Keep enabled state and selected IP unchanged for existing domains.
+            if target_group_id is not None:
+                result[domain].group_id = target_group_id
     logger.info(
         "entries_merged",
         base_count=len(base),
@@ -561,6 +573,7 @@ def merge_entries(
 def replace_entries(
     base: dict[str, HostEntry],
     incoming: dict[str, HostEntry],
+    target_group_id: str | None = None,
 ) -> tuple[dict[str, HostEntry], EntryDiff]:
     result: dict[str, HostEntry] = {}
     added_domains = sorted(set(incoming) - set(base))
@@ -579,9 +592,17 @@ def replace_entries(
             added, _removed = current.set_ips_replace(imported.ips)
             if added:
                 added_ips[domain] = added
+            if target_group_id is not None:
+                current.group_id = target_group_id
             result[domain] = current
         else:
-            result[domain] = HostEntry(imported.domain, list(imported.ips), imported.selected_ip, True)
+            result[domain] = HostEntry(
+                imported.domain,
+                list(imported.ips),
+                imported.selected_ip,
+                True,
+                target_group_id or imported.group_id,
+            )
     logger.info(
         "entries_replaced",
         base_count=len(base),
@@ -608,14 +629,62 @@ def parse_import_text(text: str) -> dict[str, HostEntry]:
     if not text.strip():
         raise ValueError("Данные для импорта не указаны")
 
-    stripped = text.lstrip()
-    if stripped.startswith("[") or stripped.startswith("{"):
+    import_format = detect_import_format(text)
+    if import_format == "json":
         entries = parse_json_import_text(text)
         logger.info("import_text_parsed", format="json", entries_count=len(entries))
+        return entries
+    if import_format == "hosts":
+        entries = parse_hosts_import_text(text)
+        logger.info("import_text_parsed", format="hosts", entries_count=len(entries))
         return entries
 
     entries = parse_delimited_import_text(text)
     logger.info("import_text_parsed", format="delimited", entries_count=len(entries))
+    return entries
+
+
+def detect_import_format(text: str) -> ImportFormat:
+    """Detect JSON, standard hosts (IP first), or domain-first delimited input."""
+    if not text.strip():
+        raise ValueError("Данные для импорта не указаны")
+
+    stripped = text.lstrip()
+    if stripped.startswith("[") or stripped.startswith("{"):
+        return "json"
+
+    for line in text.splitlines():
+        body = line.strip()
+        if not body or body.startswith("#"):
+            continue
+        body = body.split("#", 1)[0].strip()
+        if not body:
+            continue
+        first_column = body.split(maxsplit=1)[0]
+        try:
+            validate_ip(first_column)
+        except ValueError:
+            return "delimited"
+        return "hosts"
+    return "delimited"
+
+
+def parse_hosts_import_text(text: str) -> dict[str, HostEntry]:
+    entries: dict[str, HostEntry] = {}
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parsed = parse_hosts_line(line)
+        if not parsed:
+            raise ValueError(f"Строка {line_number}: ожидаются IP и хотя бы один домен")
+        for domain, ip, _enabled in parsed:
+            if domain in entries:
+                entries[domain].add_ips([ip])
+            else:
+                entries[domain] = HostEntry(domain=domain, ips=[ip], selected_ip=ip, enabled=True)
+    if not entries:
+        raise ValueError("Данные для импорта не содержат записей hosts")
     return entries
 
 

@@ -140,12 +140,15 @@ application, the console is disabled and JSON logs are written to the rotating
 
 ## Import
 
-The Import window accepts TXT `domain IP` pairs, CSV/TSV with `domain` and
-`ip`/`ips` columns, and JSON arrays of objects. Data can be pasted, selected with
-the file dialog, or dropped onto the input area. Before applying an import, the
-window shows the number of recognized domains and domain/IP relationships.
-TXT/CSV/TSV errors include a line number, while JSON syntax errors include a line
-and column.
+The Import window automatically detects standard hosts format (`IP domain`), TXT
+`domain IP` pairs, CSV/TSV with `domain` and `ip`/`ips` columns, and JSON arrays
+of objects. A hosts line may contain multiple domains for one IP and an inline
+comment. Data can be pasted, selected with the file dialog, or dropped onto the
+input area. Before applying an import, choose its target group; the window shows
+the detected format and the number of recognized domains and domain/IP
+relationships. Every imported domain, including an existing one, is moved to the
+selected group. TXT/CSV/TSV/hosts errors include a line number, while JSON syntax
+errors include a line and column.
 
 ## URL sources
 
@@ -177,7 +180,8 @@ automatically at application startup.
 
 Domains can be visually divided into groups and moved individually or in a
 multiple selection. `Default` is always the first group: it cannot be deleted,
-renamed, or moved, and new domains from imports and URL sources are placed there.
+renamed, or moved. A target group is selected for a manual import, while new
+domains from URL sources are placed in `Default`.
 
 A group switch temporarily excludes all its domains from the resulting `hosts`
 file without changing the individual record switches. Groups and disabled records

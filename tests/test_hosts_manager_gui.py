@@ -279,6 +279,32 @@ def test_parse_import_text_supports_whitespace_delimiter() -> None:
     assert entries["other.test"].ips == ["::1"]
 
 
+def test_parse_import_text_detects_standard_hosts_format() -> None:
+    text = """\
+# Local aliases
+127.0.0.1 example.test alias.test # inline comment
+::1 ipv6.test
+"""
+
+    entries = hmg.parse_import_text(text)
+
+    assert hmg.detect_import_format(text) == "hosts"
+    assert entries["example.test"].ips == ["127.0.0.1"]
+    assert entries["alias.test"].ips == ["127.0.0.1"]
+    assert entries["ipv6.test"].ips == ["::1"]
+
+
+def test_detect_import_format_distinguishes_supported_formats() -> None:
+    assert hmg.detect_import_format("example.test 127.0.0.1") == "delimited"
+    assert hmg.detect_import_format("domain,ip\nexample.test,127.0.0.1") == "delimited"
+    assert hmg.detect_import_format('[{"domain": "example.test", "ip": "127.0.0.1"}]') == "json"
+
+
+def test_hosts_import_reports_invalid_line_number() -> None:
+    with pytest.raises(ValueError, match=r"Строка 2: ожидаются IP и хотя бы один домен"):
+        hmg.parse_import_text("127.0.0.1 example.test\ninvalid-line\n")
+
+
 def test_parse_import_text_supports_tsv_and_semicolon_delimiters() -> None:
     tsv_entries = hmg.parse_import_text("example.test\t127.0.0.1\n")
     semicolon_entries = hmg.parse_import_text("example.test;127.0.0.1\n")
@@ -329,6 +355,23 @@ def test_merge_entries_keeps_existing_state_and_adds_new_ips() -> None:
     assert diff["added_ips"] == {"example.test": ["10.0.0.1"]}
 
 
+def test_merge_entries_places_all_imported_domains_in_target_group() -> None:
+    base = {
+        "existing.test": hmg.HostEntry("existing.test", ["127.0.0.1"], group_id="old"),
+        "untouched.test": hmg.HostEntry("untouched.test", ["127.0.0.2"], group_id="old"),
+    }
+    incoming = {
+        "existing.test": hmg.HostEntry("existing.test", ["10.0.0.1"]),
+        "new.test": hmg.HostEntry("new.test", ["10.0.0.2"]),
+    }
+
+    merged, _diff = hmg.merge_entries(base, incoming, target_group_id="work")
+
+    assert merged["existing.test"].group_id == "work"
+    assert merged["new.test"].group_id == "work"
+    assert merged["untouched.test"].group_id == "old"
+
+
 def test_replace_entries_preserves_existing_enabled_state() -> None:
     base = {
         "example.test": hmg.HostEntry(
@@ -350,6 +393,18 @@ def test_replace_entries_preserves_existing_enabled_state() -> None:
     assert replaced["example.test"].selected_ip == "10.0.0.1"
     assert diff["removed_domains"] == ["removed.test"]
     assert diff["added_ips"] == {"example.test": ["10.0.0.1"]}
+
+
+def test_replace_entries_places_imported_domains_in_target_group() -> None:
+    base = {"existing.test": hmg.HostEntry("existing.test", ["127.0.0.1"], group_id="old")}
+    incoming = {
+        "existing.test": hmg.HostEntry("existing.test", ["10.0.0.1"]),
+        "new.test": hmg.HostEntry("new.test", ["10.0.0.2"]),
+    }
+
+    replaced, _diff = hmg.replace_entries(base, incoming, target_group_id="work")
+
+    assert {entry.group_id for entry in replaced.values()} == {"work"}
 
 
 def test_write_hosts_creates_backup_and_writes_content(tmp_path: Path) -> None:

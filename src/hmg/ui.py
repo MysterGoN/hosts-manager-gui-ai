@@ -72,6 +72,7 @@ from hmg.core import (
     HostEntry,
     HostGroup,
     build_preserve_hosts_text,
+    detect_import_format,
     hosts_path,
     load_state_with_groups,
     merge_entries,
@@ -1008,13 +1009,14 @@ class HelpDialog(QDialog):
               <li>У домена может быть несколько IP, но в <code>hosts</code> используется выбранный активный IP.</li>
               <li>Отключённая запись не записывается в <code>hosts</code>.</li>
               <li>Отключение группы исключает из <code>hosts</code> всю группу, не меняя состояния её записей.</li>
-              <li>Новые записи из импорта и URL сначала попадают в группу <b>Default</b>.</li>
+              <li>Для ручного импорта выбирается целевая группа; новые записи из URL попадают в <b>Default</b>.</li>
             </ul>
 
             <h2>Импорт и URL-источники</h2>
-            <p>Импорт принимает TXT, CSV/TSV и JSON. Управление URL находится в
-            <b>Источники</b>, а загрузка запускается отдельно через <b>Загрузка из URL</b>.
-            Перед применением всегда показывается preview.</p>
+            <p>Импорт автоматически определяет hosts (<code>IP domain</code>), TXT
+            (<code>domain IP</code>), CSV/TSV и JSON. Перед применением выбирается
+            целевая группа и всегда показывается preview. Управление URL находится в
+            <b>Источники</b>, а загрузка запускается отдельно через <b>Загрузка из URL</b>.</p>
 
             <h2>Обновление</h2>
             <p>Кнопка <b>Обновление</b> проверяет последний GitHub Release. Собранное
@@ -1218,9 +1220,9 @@ class ImportDropTextEdit(QTextEdit):
 
 
 class ImportDialog(QDialog):
-    def __init__(self, parent: QWidget) -> None:
+    def __init__(self, parent: QWidget, groups: list[HostGroup]) -> None:
         super().__init__(parent)
-        self.result_data: tuple[str, dict[str, HostEntry]] | None = None
+        self.result_data: tuple[str, str, dict[str, HostEntry]] | None = None
         self.parsed_entries: dict[str, HostEntry] | None = None
         self.setWindowTitle("Импорт записей")
         self.setMinimumSize(720, 620)
@@ -1244,10 +1246,21 @@ class ImportDialog(QDialog):
         mode_layout.addStretch()
         layout.addWidget(mode_box)
 
+        group_box = QGroupBox("Группа назначения")
+        group_layout = QFormLayout(group_box)
+        self.group_combo = QComboBox()
+        for group in groups:
+            self.group_combo.addItem(group.name, group.id)
+        self.group_combo.setAccessibleName("Группа для импортируемых записей")
+        self.group_combo.setAccessibleDescription("Все импортируемые домены будут помещены в выбранную группу")
+        group_layout.addRow("Импортировать в", self.group_combo)
+        layout.addWidget(group_box)
+
         formats = QGroupBox("Поддерживаемые форматы")
         formats_layout = QVBoxLayout(formats)
         formats_hint = QLabel(
-            'TXT: domain IP · CSV/TSV: столбцы domain и ip/ips · JSON: [{"domain": "example.local", "ip": "127.0.0.1"}]'
+            "hosts/TXT: IP domain или domain IP · CSV/TSV: столбцы domain и ip/ips · "
+            'JSON: [{"domain": "example.local", "ip": "127.0.0.1"}]'
         )
         formats_hint.setWordWrap(True)
         formats_hint.setObjectName("hint")
@@ -1263,7 +1276,7 @@ class ImportDialog(QDialog):
         layout.addLayout(label_row)
         self.import_text = ImportDropTextEdit()
         self.import_text.setFont(monospace_font())
-        self.import_text.setPlaceholderText("Перетащите сюда .txt, .csv, .tsv или .json\n\nexample.local  127.0.0.1")
+        self.import_text.setPlaceholderText("Перетащите сюда .txt, .csv, .tsv или .json\n\n127.0.0.1  example.local")
         self.import_text.file_dropped.connect(self.load_path)
         self.import_text.setAccessibleName("Данные для импорта")
         self.import_text.setAccessibleDescription("Можно вставить текст или перетащить поддерживаемый файл")
@@ -1323,18 +1336,28 @@ class ImportDialog(QDialog):
             return
         domains_count = len(entries)
         pairs_count = sum(len(entry.ips) for entry in entries.values())
+        format_labels = {"json": "JSON", "hosts": "hosts (IP domain)", "delimited": "domain IP / CSV / TSV"}
+        format_label = format_labels[detect_import_format(self.import_text.toPlainText())]
         self.parsed_entries = entries
         self.import_button.setEnabled(True)
         self.import_status.setStyleSheet("color: #8ED6A8;")
-        self.import_status.setText(f"Распознано доменов: {domains_count} · связей домен/IP: {pairs_count}")
+        self.import_status.setText(
+            f"Формат: {format_label} · доменов: {domains_count} · связей домен/IP: {pairs_count}"
+        )
 
     def parse_and_accept(self) -> None:
         self.refresh_import_stats()
         if self.parsed_entries is None:
             return
         mode = "merge" if self.merge_radio.isChecked() else "replace"
-        self.result_data = (mode, self.parsed_entries)
-        logger.info("import_dialog_accepted", mode=mode, entries_count=len(self.parsed_entries))
+        group_id = str(self.group_combo.currentData())
+        self.result_data = (mode, group_id, self.parsed_entries)
+        logger.info(
+            "import_dialog_accepted",
+            mode=mode,
+            group_id=group_id,
+            entries_count=len(self.parsed_entries),
+        )
         self.accept()
 
 
@@ -2914,19 +2937,19 @@ class HostsApp(QMainWindow):
             self.refresh_table()
 
     def import_entries(self) -> None:
-        dialog = ImportDialog(self)
+        dialog = ImportDialog(self, self.groups)
         if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.result_data:
             return
-        mode, incoming = dialog.result_data
+        mode, group_id, incoming = dialog.result_data
         try:
             if mode == "merge":
-                new_entries, diff = merge_entries(self.entries, incoming)
+                new_entries, diff = merge_entries(self.entries, incoming, group_id)
                 title = "Предпросмотр импорта: обновление"
             else:
-                new_entries, diff = replace_entries(self.entries, incoming)
+                new_entries, diff = replace_entries(self.entries, incoming, group_id)
                 title = "Предпросмотр импорта: замена"
         except Exception as exc:
-            logger.warning("import_failed", mode=mode, error=str(exc))
+            logger.warning("import_failed", mode=mode, group_id=group_id, error=str(exc))
             QMessageBox.critical(self, APP_NAME, f"Импорт не удался:\n{exc}")
             return
         preview = ChangePreview(self, title, diff, "Применить импорт")

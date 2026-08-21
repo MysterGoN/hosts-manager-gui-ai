@@ -84,7 +84,7 @@ def check_scale(scale: str) -> int:
         main_window,
         HelpDialog(parent),
         EntryDialog(parent),
-        ImportDialog(parent),
+        ImportDialog(parent, [default_group()]),
         SourceEditDialog(parent),
         SourcesDialog(parent, [source]),
         SourceSyncDialog(parent, [source]),
