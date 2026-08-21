@@ -1,3 +1,9 @@
+## v0.5.0 (2026-08-21)
+
+### Feat
+
+- add hosts import and target groups
+
 ## v0.4.1 (2026-07-31)
 
 ### Fix
