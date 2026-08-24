@@ -1,3 +1,9 @@
+## v0.7.0 (2026-08-24)
+
+### Feat
+
+- improve privileged writes and responsiveness
+
 ## v0.6.0 (2026-08-21)
 
 ### Feat
