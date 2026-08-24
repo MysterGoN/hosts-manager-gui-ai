@@ -9,10 +9,13 @@ from pathlib import Path
 
 from platformdirs import PlatformDirs
 
+from hmg.tracing import traced
+
 APP_ID = "HostsManagerGUI"
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 MIN_LOG_RETENTION_SECONDS = 60
 MAX_LOG_RETENTION_SECONDS = 3650 * 24 * 60 * 60
+MAX_AUTHORIZATION_TTL_SECONDS = 60 * 60
 
 
 def platform_directories() -> PlatformDirs:
@@ -49,6 +52,8 @@ class AppSettings:
     log_backup_count: int = 5
     log_retention_seconds: int = 30 * 24 * 60 * 60
     log_to_file_in_dev: bool = False
+    authorization_ttl_seconds: int = 5 * 60
+    trace_enabled: bool = False
 
     @property
     def data_path(self) -> Path:
@@ -71,6 +76,8 @@ class AppSettings:
             raise ValueError("Количество архивов должно быть от 1 до 100")
         if not MIN_LOG_RETENTION_SECONDS <= self.log_retention_seconds <= MAX_LOG_RETENTION_SECONDS:
             raise ValueError("Срок хранения логов должен быть от 1 min до 3650 d")
+        if not 0 <= self.authorization_ttl_seconds <= MAX_AUTHORIZATION_TTL_SECONDS:
+            raise ValueError("Срок авторизации должен быть от 0 до 60 минут")
         return self
 
 
@@ -81,6 +88,7 @@ def default_settings() -> AppSettings:
     return AppSettings(data_dir=str(default_data_dir()), log_dir=str(default_log_dir()))
 
 
+@traced("settings.load")
 def load_settings() -> AppSettings:
     path = settings_file_path()
     if not path.exists():
@@ -104,6 +112,10 @@ def load_settings() -> AppSettings:
             log_backup_count=int(payload.get("log_backup_count", defaults.log_backup_count)),
             log_retention_seconds=int(retention_seconds),
             log_to_file_in_dev=bool(payload.get("log_to_file_in_dev", defaults.log_to_file_in_dev)),
+            authorization_ttl_seconds=int(
+                payload.get("authorization_ttl_seconds", defaults.authorization_ttl_seconds)
+            ),
+            trace_enabled=bool(payload.get("trace_enabled", defaults.trace_enabled)),
         ).validate()
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return default_settings()
@@ -116,6 +128,7 @@ def get_settings(*, refresh: bool = False) -> AppSettings:
     return _settings
 
 
+@traced("settings.save")
 def save_settings(settings: AppSettings) -> None:
     global _settings
     settings.validate()

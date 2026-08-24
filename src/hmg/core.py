@@ -20,7 +20,9 @@ from typing import Literal, TypedDict
 import idna
 
 from hmg.logging import get_logger
+from hmg.privileges import PrivilegedSessionError, write_hosts_with_session
 from hmg.settings import get_settings
+from hmg.tracing import traced
 
 APP_NAME = "Hosts Manager GUI"
 STATE_VERSION = 2
@@ -250,6 +252,7 @@ def parse_hosts_line(line: str, allow_disabled: bool = False) -> list[tuple[str,
     return result
 
 
+@traced("core.parse_hosts_text")
 def parse_hosts_text(text: str) -> dict[str, HostEntry]:
     entries: dict[str, HostEntry] = {}
     in_managed_block = False
@@ -305,6 +308,7 @@ def new_group(name: str) -> HostGroup:
     return HostGroup(uuid.uuid4().hex, name)
 
 
+@traced("core.load_state")
 def load_state_with_groups() -> tuple[dict[str, HostEntry], list[HostGroup]]:
     path = state_path()
     if not path.exists():
@@ -349,6 +353,7 @@ def load_state() -> dict[str, HostEntry]:
     return entries
 
 
+@traced("core.save_state")
 def save_state(entries: dict[str, HostEntry], groups: Iterable[HostGroup] | None = None) -> None:
     path = state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -369,6 +374,7 @@ def save_state(entries: dict[str, HostEntry], groups: Iterable[HostGroup] | None
     )
 
 
+@traced("core.read_hosts_file")
 def read_hosts_file(path: Path) -> str:
     if not path.exists():
         logger.info("hosts_file_missing", path=str(path))
@@ -408,6 +414,7 @@ def extract_managed_block(lines: list[str]) -> list[str] | None:
     return None
 
 
+@traced("core.build_managed_block")
 def build_managed_block(
     entries: dict[str, HostEntry],
     groups: Iterable[HostGroup] | None = None,
@@ -437,6 +444,7 @@ def build_managed_block(
     return "\n".join(lines) + "\n"
 
 
+@traced("core.build_preserve_hosts_text")
 def build_preserve_hosts_text(
     original_text: str,
     entries: dict[str, HostEntry],
@@ -459,6 +467,7 @@ def build_preserve_hosts_text(
     return block + "\n"
 
 
+@traced("core.write_hosts")
 def write_hosts(path: Path, content: str) -> Path:
     logger.info("hosts_write_started", path=str(path), bytes_count=len(content.encode("utf-8")))
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -473,8 +482,18 @@ def write_hosts(path: Path, content: str) -> Path:
     return backup
 
 
-def write_hosts_elevated(path: Path, content: str) -> Path:
+@traced("core.write_hosts_elevated")
+def write_hosts_elevated(path: Path, content: str, authorization_ttl_seconds: int = 0) -> Path:
     logger.info("hosts_elevated_write_started", path=str(path), bytes_count=len(content.encode("utf-8")))
+    if authorization_ttl_seconds > 0:
+        if path.absolute() != hosts_path().absolute():
+            raise ElevatedWriteError("Привилегированная сессия разрешает запись только в системный hosts")
+        try:
+            backup = write_hosts_with_session(content, authorization_ttl_seconds)
+        except PrivilegedSessionError as exc:
+            raise ElevatedWriteError(str(exc)) from exc
+        logger.info("hosts_elevated_write_finished", path=str(path), backup=str(backup), platform="session")
+        return backup
     backup = path.with_name(f"{path.name}.{now_stamp()}.bak")
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="\n", delete=False) as file:
         file.write(content)
@@ -584,6 +603,7 @@ def run_elevated_write_windows(path: Path, temp_path: Path, backup: Path) -> Non
         script_path.unlink(missing_ok=True)
 
 
+@traced("core.merge_entries")
 def merge_entries(
     base: dict[str, HostEntry],
     incoming: dict[str, HostEntry],
@@ -623,6 +643,7 @@ def merge_entries(
     return result, {"added_domains": added_domains, "added_ips": added_ips, "removed_domains": []}
 
 
+@traced("core.replace_entries")
 def replace_entries(
     base: dict[str, HostEntry],
     incoming: dict[str, HostEntry],
@@ -678,6 +699,7 @@ def parse_csv_file(path: Path) -> dict[str, HostEntry]:
     return parse_import_file(path)
 
 
+@traced("core.parse_import_text")
 def parse_import_text(text: str) -> dict[str, HostEntry]:
     if not text.strip():
         raise ValueError("Данные для импорта не указаны")

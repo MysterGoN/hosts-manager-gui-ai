@@ -22,6 +22,8 @@ def test_settings_round_trip_in_platform_config_file(
         log_backup_count=7,
         log_retention_seconds=14 * 24 * 60 * 60,
         log_to_file_in_dev=True,
+        authorization_ttl_seconds=10 * 60,
+        trace_enabled=True,
     )
 
     save_settings(expected)
@@ -60,6 +62,15 @@ def test_invalid_settings_file_falls_back_to_defaults(
 
     assert loaded.data_path == tmp_path / "data"
     assert loaded.log_path == tmp_path / "logs"
+
+
+def test_authorization_ttl_is_limited_to_one_hour(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Срок авторизации"):
+        AppSettings(
+            data_dir=str(tmp_path / "data"),
+            log_dir=str(tmp_path / "logs"),
+            authorization_ttl_seconds=60 * 60 + 1,
+        ).validate()
 
 
 def test_application_environment_can_override_initial_directories(

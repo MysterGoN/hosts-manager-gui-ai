@@ -5,6 +5,7 @@ import re
 import shutil
 import signal
 import sys
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -91,8 +92,10 @@ from hmg.core import (
     write_hosts_elevated,
 )
 from hmg.logging import configure_logging, get_logger
+from hmg.privileges import authorization_session_active, close_authorization_session
 from hmg.settings import (
     LOG_LEVELS,
+    MAX_AUTHORIZATION_TTL_SECONDS,
     MAX_LOG_RETENTION_SECONDS,
     AppSettings,
     default_data_dir,
@@ -120,6 +123,7 @@ from hmg.sources import (
     summarize_source_changes,
     validate_source_url,
 )
+from hmg.tracing import configure_tracing, trace, traced
 from hmg.updater import (
     PreparedUpdate,
     ReleaseInfo,
@@ -401,6 +405,38 @@ def entry_matches_filters(
     return True
 
 
+@traced("search.filter_entries")
+def filter_entries_by_group(
+    entries: dict[str, HostEntry],
+    groups: list[HostGroup],
+    origins: Origins,
+    *,
+    query: str,
+    state_filter: str,
+    group_filter: str,
+    source_filter: str,
+) -> tuple[dict[str, int], dict[str, list[tuple[str, HostEntry]]]]:
+    totals = {group.id: 0 for group in groups}
+    matched: dict[str, list[tuple[str, HostEntry]]] = {group.id: [] for group in groups}
+    for domain, entry in entries.items():
+        if entry.group_id not in totals:
+            continue
+        totals[entry.group_id] += 1
+        if entry_matches_filters(
+            entry,
+            origins,
+            query=query,
+            state_filter=state_filter,
+            group_id=group_filter,
+            source_id=source_filter,
+        ):
+            matched[entry.group_id].append((domain, entry))
+    for group_entries in matched.values():
+        group_entries.sort(key=lambda item: display_domain(item[0]).casefold())
+    return totals, matched
+
+
+@traced("ui.save_internal_state")
 def save_internal_state(
     entries: dict[str, HostEntry],
     groups: list[HostGroup],
@@ -1078,6 +1114,40 @@ class UpdatePrepareWorker(QThread):
             self.completed.emit(prepare_update(self.release))
         except Exception as exc:
             self.failed.emit(str(exc))
+
+
+class SourceFetchWorker(QThread):
+    source_completed = Signal(object, int, int)
+    completed = Signal(object, bool)
+
+    def __init__(self, sources: list[UrlSource], parent: QWidget | None) -> None:
+        super().__init__(parent)
+        self.sources = list(sources)
+        self._cancel_requested = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancel_requested.set()
+
+    def run(self) -> None:
+        results: list[SourceFetchResult] = []
+        with trace("url_sources.fetch_all", sources_count=len(self.sources)):
+            for index, source in enumerate(self.sources, start=1):
+                if self._cancel_requested.is_set():
+                    break
+                try:
+                    entries = fetch_source(source)
+                    result = SourceFetchResult(source, entries=entries)
+                except Exception as exc:
+                    logger.warning(
+                        "url_source_fetch_failed",
+                        source_id=source.id,
+                        source_name=source.name,
+                        error=str(exc),
+                    )
+                    result = SourceFetchResult(source, error=str(exc))
+                results.append(result)
+                self.source_completed.emit(result, index, len(self.sources))
+        self.completed.emit(results, self._cancel_requested.is_set())
 
 
 class UpdateDialog(QDialog):
@@ -2028,7 +2098,28 @@ class SettingsDialog(QDialog):
         )
         mode_hint.setObjectName("hint")
         logs_form.addRow("", mode_hint)
+        self.trace_check = VisibleCheckBox("Режим tracing: замерять логические узлы")
+        self.trace_check.setChecked(settings.trace_enabled)
+        self.trace_check.setToolTip("Добавляет trace_started/trace_finished с длительностью узлов в JSON-логи")
+        logs_form.addRow("", self.trace_check)
         layout.addWidget(logs)
+
+        authorization = QGroupBox("Права администратора")
+        authorization_form = QFormLayout(authorization)
+        self.authorization_ttl_spin = QSpinBox()
+        self.authorization_ttl_spin.setRange(0, MAX_AUTHORIZATION_TTL_SECONDS // 60)
+        self.authorization_ttl_spin.setSuffix(" мин")
+        self.authorization_ttl_spin.setValue(settings.authorization_ttl_seconds // 60)
+        self.authorization_ttl_spin.setAccessibleName("Срок привилегированной сессии")
+        authorization_form.addRow("Не спрашивать повторно", self.authorization_ttl_spin)
+        authorization_hint = QLabel(
+            "По умолчанию 5 минут. 0 — запрашивать права при каждом сохранении. "
+            "Пароль не записывается в settings.json и не хранится приложением."
+        )
+        authorization_hint.setObjectName("hint")
+        authorization_hint.setWordWrap(True)
+        authorization_form.addRow("", authorization_hint)
+        layout.addWidget(authorization)
 
         buttons = dialog_buttons(self, "Сохранить")
         buttons.accepted.disconnect()
@@ -2104,6 +2195,8 @@ class SettingsDialog(QDialog):
                 RETENTION_UNITS,
             ),
             log_to_file_in_dev=self.dev_file_check.isChecked(),
+            authorization_ttl_seconds=self.authorization_ttl_spin.value() * 60,
+            trace_enabled=self.trace_check.isChecked(),
         )
         try:
             settings.validate()
@@ -2128,9 +2221,16 @@ class HostsApp(QMainWindow):
         self._applied_hosts_snapshot: HostsSnapshot = ()
         self._collapsed_group_ids: set[str] = set()
         self._group_status_labels: dict[str, QLabel] = {}
+        self._group_count_labels: dict[str, QLabel] = {}
+        self._group_base_count_text: dict[str, str] = {}
+        self._table_group_rows: dict[str, int] = {}
+        self._table_domain_rows: dict[str, int] = {}
         self._refreshing = False
         self._update_check_worker: UpdateCheckWorker | None = None
         self._update_prepare_worker: UpdatePrepareWorker | None = None
+        self._source_fetch_worker: SourceFetchWorker | None = None
+        self._source_progress: QProgressDialog | None = None
+        self._source_fetch_action: str | None = None
         self._prepared_update: PreparedUpdate | None = None
         self._update_in_progress = False
 
@@ -2139,6 +2239,7 @@ class HostsApp(QMainWindow):
         self.refresh_table()
         logger.info("app_initialized", hosts_file=str(self.hosts_file), entries_count=len(self.entries))
 
+    @traced("ui.load_initial_data")
     def load_initial_data(self) -> None:
         logger.info("initial_data_load_started")
         state_available = state_path().exists()
@@ -2227,14 +2328,14 @@ class HostsApp(QMainWindow):
         import_button.setToolTip("Импортировать записи (Ctrl+I)")
         import_button.clicked.connect(self.import_entries)
         toolbar.addWidget(import_button)
-        sources_button = QPushButton("Источники")
-        sources_button.setToolTip("Управление URL-источниками")
-        sources_button.clicked.connect(self.manage_sources)
-        toolbar.addWidget(sources_button)
-        sync_button = QPushButton("Загрузка из URL")
-        sync_button.setToolTip("Загрузить активные источники и проверить изменения")
-        sync_button.clicked.connect(self.synchronize_sources)
-        toolbar.addWidget(sync_button)
+        self.sources_button = QPushButton("Источники")
+        self.sources_button.setToolTip("Управление URL-источниками")
+        self.sources_button.clicked.connect(self.manage_sources)
+        toolbar.addWidget(self.sources_button)
+        self.sync_button = QPushButton("Загрузка из URL")
+        self.sync_button.setToolTip("Загрузить активные источники и проверить изменения")
+        self.sync_button.clicked.connect(self.synchronize_sources)
+        toolbar.addWidget(self.sync_button)
         groups_button = QPushButton("Группы")
         groups_button.clicked.connect(self.manage_groups)
         toolbar.addWidget(groups_button)
@@ -2247,7 +2348,11 @@ class HostsApp(QMainWindow):
         self.search_edit.setAccessibleName("Поиск по домену или IP")
         self.search_edit.setToolTip("Перейти к поиску: Ctrl+F")
         self.search_edit.setClearButtonEnabled(True)
-        self.search_edit.textChanged.connect(lambda _text: self.refresh_table())
+        self.search_timer = QTimer(self)
+        self.search_timer.setSingleShot(True)
+        self.search_timer.setInterval(150)
+        self.search_timer.timeout.connect(self.apply_search_filter)
+        self.search_edit.textChanged.connect(lambda _text: self.search_timer.start())
         filters.addWidget(self.search_edit, 1)
         self.state_filter = QComboBox()
         self.state_filter.setAccessibleName("Фильтр по состоянию записи")
@@ -2529,39 +2634,39 @@ class HostsApp(QMainWindow):
             + [(source.name, source.id) for source in self.sources],
         )
 
+    @traced("search.refresh_and_render_table")
     def refresh_table(self, selected_domain: str | None = None) -> None:
         self._refreshing = True
         self.refresh_filter_options()
         blocker = QSignalBlocker(self.table)
+        self.table.setUpdatesEnabled(False)
         self.table.setRowCount(0)
         self._group_status_labels.clear()
-        query = self.search_edit.text()
+        self._group_count_labels.clear()
+        self._group_base_count_text.clear()
+        self._table_group_rows.clear()
+        self._table_domain_rows.clear()
         state_filter = str(self.state_filter.currentData() or "")
         group_filter = str(self.group_filter.currentData() or "")
         source_filter = str(self.source_filter.currentData() or "")
-        filters_active = bool(query.strip() or state_filter or group_filter or source_filter)
+        filters_active = bool(state_filter or group_filter or source_filter)
+        totals, matched_by_group = filter_entries_by_group(
+            self.entries,
+            self.groups,
+            self.origins,
+            query="",
+            state_filter=state_filter,
+            group_filter=group_filter,
+            source_filter=source_filter,
+        )
         for group in self.groups:
-            total_entries = sum(entry.group_id == group.id for entry in self.entries.values())
-            group_entries = sorted(
-                (
-                    (domain, entry)
-                    for domain, entry in self.entries.items()
-                    if entry.group_id == group.id
-                    and entry_matches_filters(
-                        entry,
-                        self.origins,
-                        query=query,
-                        state_filter=state_filter,
-                        group_id=group_filter,
-                        source_id=source_filter,
-                    )
-                ),
-                key=lambda item: display_domain(item[0]).casefold(),
-            )
+            total_entries = totals[group.id]
+            group_entries = matched_by_group[group.id]
             if not group_entries and filters_active:
                 continue
             header_row = self.table.rowCount()
             self.table.insertRow(header_row)
+            self._table_group_rows[group.id] = header_row
             self.table.setSpan(header_row, 0, 1, 5)
             group_cell = QWidget()
             group_cell.setObjectName("groupHeader")
@@ -2592,6 +2697,8 @@ class HostsApp(QMainWindow):
             count_label = QLabel(count_text)
             count_label.setObjectName("hint")
             group_layout.addWidget(count_label)
+            self._group_count_labels[group.id] = count_label
+            self._group_base_count_text[group.id] = count_text
             group_status = QLabel()
             group_status.setAccessibleName(f"Состояние группы {group.name} в hosts")
             group_layout.addWidget(group_status)
@@ -2607,6 +2714,7 @@ class HostsApp(QMainWindow):
                 readable_domain = display_domain(domain)
                 row = self.table.rowCount()
                 self.table.insertRow(row)
+                self._table_domain_rows[domain] = row
 
                 check = VisibleCheckBox()
                 check.setChecked(entry.enabled)
@@ -2654,10 +2762,52 @@ class HostsApp(QMainWindow):
                 if domain == selected_domain:
                     self.table.selectRow(row)
         self.table.scrollToTop()
+        self.table.setUpdatesEnabled(True)
         del blocker
         self._refreshing = False
+        if self.search_edit.text().strip():
+            self.apply_search_filter()
         self.update_selection_actions()
         self.refresh_hosts_status()
+
+    @traced("search.apply_visibility")
+    def apply_search_filter(self) -> None:
+        query = self.search_edit.text().strip()
+        if not self._table_group_rows:
+            return
+        visible_domains: set[str]
+        matched_by_group: dict[str, list[tuple[str, HostEntry]]]
+        totals: dict[str, int]
+        if query:
+            totals, matched_by_group = filter_entries_by_group(
+                self.entries,
+                self.groups,
+                self.origins,
+                query=query,
+                state_filter=str(self.state_filter.currentData() or ""),
+                group_filter=str(self.group_filter.currentData() or ""),
+                source_filter=str(self.source_filter.currentData() or ""),
+            )
+            visible_domains = {
+                domain for group_entries in matched_by_group.values() for domain, _entry in group_entries
+            }
+        else:
+            totals = {}
+            matched_by_group = {}
+            visible_domains = set(self._table_domain_rows)
+
+        self.table.setUpdatesEnabled(False)
+        for domain, row in self._table_domain_rows.items():
+            self.table.setRowHidden(row, domain not in visible_domains)
+        for group_id, row in self._table_group_rows.items():
+            group_matches = matched_by_group.get(group_id, [])
+            self.table.setRowHidden(row, bool(query) and not group_matches)
+            count_label = self._group_count_labels[group_id]
+            if query:
+                count_label.setText(f"{len(group_matches)} из {totals[group_id]}")
+            else:
+                count_label.setText(self._group_base_count_text[group_id])
+        self.table.setUpdatesEnabled(True)
 
     def toggle_group_collapsed(self, group_id: str) -> None:
         if group_id in self._collapsed_group_ids:
@@ -2985,6 +3135,7 @@ class HostsApp(QMainWindow):
                 "Импорт применён к local state · файл hosts пока не изменён",
             )
 
+    @traced("ui.build_hosts_preview")
     def build_preview_texts(self) -> tuple[str, str]:
         original = read_hosts_file(self.hosts_file)
         content = build_preserve_hosts_text(original, self.entries, self.groups)
@@ -3017,6 +3168,7 @@ class HostsApp(QMainWindow):
             logger.exception("hosts_save_failed")
             QMessageBox.critical(self, APP_NAME, f"Сохранение не удалось:\n{exc}")
 
+    @traced("ui.save_hosts")
     def write_content(self, content: str) -> None:
         try:
             backup = write_hosts(self.hosts_file, content)
@@ -3032,7 +3184,8 @@ class HostsApp(QMainWindow):
         )
 
     def write_content_elevated(self, content: str) -> Path:
-        if not confirm_action(
+        ttl_seconds = get_settings().authorization_ttl_seconds
+        if not authorization_session_active(ttl_seconds) and not confirm_action(
             self,
             APP_NAME,
             "Для записи нужны права администратора.\n\nЗапросить права и продолжить?",
@@ -3041,7 +3194,11 @@ class HostsApp(QMainWindow):
         ):
             raise PermissionError("Пользователь отменил запрос прав администратора")
         try:
-            return write_hosts_elevated(self.hosts_file, content)
+            return write_hosts_elevated(
+                self.hosts_file,
+                content,
+                authorization_ttl_seconds=ttl_seconds,
+            )
         except ElevatedWriteError as exc:
             raise PermissionError(f"Не удалось получить права администратора: {exc}") from exc
 
@@ -3078,6 +3235,9 @@ class HostsApp(QMainWindow):
                 updated.log_path.mkdir(parents=True, exist_ok=True)
             save_settings(updated)
             log_path = configure_logging(updated)
+            configure_tracing(updated.trace_enabled)
+            if updated.authorization_ttl_seconds != current.authorization_ttl_seconds:
+                close_authorization_session()
         except OSError as exc:
             QMessageBox.critical(self, APP_NAME, f"Не удалось сохранить настройки:\n{exc}")
             return
@@ -3096,6 +3256,7 @@ class HostsApp(QMainWindow):
             if source.exists() and not destination.exists():
                 shutil.copy2(source, destination)
 
+    @traced("ui.persist_internal_state")
     def persist_internal_state(self) -> None:
         save_internal_state(
             self.entries,
@@ -3144,39 +3305,60 @@ class HostsApp(QMainWindow):
         self.apply_sources_action(dialog.result_action)
 
     def apply_sources_action(self, action: str) -> None:
+        if self._source_fetch_worker is not None and self._source_fetch_worker.isRunning():
+            self.show_feedback("Загрузка URL-источников уже выполняется", kind="info")
+            return
         active_sources = [source for source in self.sources if source.enabled]
         progress = QProgressDialog("Загрузка источников…", "Отмена", 0, len(active_sources), self)
         progress.setWindowTitle("URL-источники")
         progress.setMinimumDuration(0)
         progress.setAutoClose(False)
-        results: list[SourceFetchResult] = []
-        canceled = False
-        for index, source in enumerate(active_sources):
+        progress.setWindowModality(Qt.WindowModality.NonModal)
+        progress.setLabelText(
+            f"Загрузка «{active_sources[0].name}»\n{active_sources[0].url}\n\n"
+            "Интерфейс остаётся доступным. Отмена сработает после текущего запроса."
+        )
+
+        worker = SourceFetchWorker(active_sources, self)
+        worker.source_completed.connect(self.source_fetch_completed)
+        worker.completed.connect(self.sources_fetch_finished)
+        progress.canceled.connect(worker.cancel)
+        self._source_fetch_worker = worker
+        self._source_progress = progress
+        self._source_fetch_action = action
+        self.sync_button.setEnabled(False)
+        self.sources_button.setEnabled(False)
+        worker.start()
+        progress.show()
+
+    def source_fetch_completed(self, result: SourceFetchResult, index: int, total: int) -> None:
+        progress = self._source_progress
+        worker = self._source_fetch_worker
+        if progress is None or worker is None:
+            return
+        progress.setValue(index)
+        if index < total and not progress.wasCanceled():
+            next_source = worker.sources[index]
             progress.setLabelText(
-                f"Загрузка «{source.name}»\n{source.url}\n\nОтмена остановит операцию перед следующим источником."
+                f"Загрузка «{next_source.name}»\n{next_source.url}\n\n"
+                "Интерфейс остаётся доступным. Отмена сработает после текущего запроса."
             )
-            progress.setValue(index)
-            QApplication.processEvents()
-            if progress.wasCanceled():
-                canceled = True
-                break
-            try:
-                entries = fetch_source(source)
-                results.append(SourceFetchResult(source, entries=entries))
-            except Exception as exc:
-                logger.warning(
-                    "url_source_fetch_failed",
-                    source_id=source.id,
-                    source_name=source.name,
-                    error=str(exc),
-                )
-                results.append(SourceFetchResult(source, error=str(exc)))
-            progress.setValue(index + 1)
-            QApplication.processEvents()
-            if progress.wasCanceled():
-                canceled = True
-                break
-        progress.close()
+        elif progress.wasCanceled():
+            progress.setLabelText("Отмена… ожидаем завершения текущего сетевого запроса")
+
+    def sources_fetch_finished(self, results: list[SourceFetchResult], canceled: bool) -> None:
+        progress = self._source_progress
+        worker = self._source_fetch_worker
+        action = self._source_fetch_action
+        if progress is not None:
+            progress.close()
+        self._source_progress = None
+        self._source_fetch_worker = None
+        self._source_fetch_action = None
+        self.sync_button.setEnabled(True)
+        self.sources_button.setEnabled(True)
+        if worker is not None:
+            worker.deleteLater()
         if canceled:
             logger.info("url_sources_fetch_canceled", completed_sources=len(results))
             self.show_feedback(
@@ -3184,7 +3366,12 @@ class HostsApp(QMainWindow):
                 kind="info",
             )
             return
+        if action is None:
+            return
+        self.finish_sources_action(action, results)
 
+    @traced("url_sources.prepare_and_preview")
+    def finish_sources_action(self, action: str, results: list[SourceFetchResult]) -> None:
         successful_count = sum(result.succeeded for result in results)
         can_apply = successful_count > 0 and not (action == "replace" and successful_count != len(results))
         if can_apply:
@@ -3233,6 +3420,15 @@ class HostsApp(QMainWindow):
         if self._update_in_progress:
             event.accept()
             return
+        if self._source_fetch_worker is not None and self._source_fetch_worker.isRunning():
+            self._source_fetch_worker.cancel()
+            QMessageBox.information(
+                self,
+                "URL-источники",
+                "Загрузка отменяется. Дождитесь завершения текущего сетевого запроса перед закрытием.",
+            )
+            event.ignore()
+            return
         active_update_worker = self._update_check_worker or self._update_prepare_worker
         if active_update_worker is not None and active_update_worker.isRunning():
             QMessageBox.information(
@@ -3270,6 +3466,7 @@ class HostsApp(QMainWindow):
 def main() -> int:
     settings = get_settings()
     log_path = configure_logging(settings)
+    configure_tracing(settings.trace_enabled)
     logger.info(
         "app_starting",
         mode="packaged" if is_packaged() else "development",
@@ -3289,6 +3486,7 @@ def main() -> int:
     window.show()
     result = application.exec()
     sigint_timer.stop()
+    close_authorization_session()
     logger.info("app_stopped")
     return result
 

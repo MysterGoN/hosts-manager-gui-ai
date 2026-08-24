@@ -14,6 +14,7 @@ from hmg.ui import (
     SIZE_UNITS,
     SOURCE_FILTER_MANUAL,
     HostsApp,
+    SourceFetchWorker,
     build_side_by_side_diff,
     collapse_unchanged_diff_rows,
     combine_measurement,
@@ -512,6 +513,55 @@ def test_write_hosts_elevated_uses_platform_runner_and_removes_temp_file(
     assert backup.name.endswith(".bak")
     assert calls == [(hosts_path, calls[0][1], backup)]
     assert not calls[0][1].exists()
+
+
+def test_write_hosts_elevated_uses_temporary_authorization_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    system_hosts = hmg.hosts_path()
+    calls: list[tuple[str, int]] = []
+
+    def fake_session_write(content: str, ttl_seconds: int) -> Path:
+        calls.append((content, ttl_seconds))
+        return system_hosts.with_name("hosts.session.bak")
+
+    monkeypatch.setattr(hmg, "write_hosts_with_session", fake_session_write)
+
+    backup = hmg.write_hosts_elevated(system_hosts, "new\n", authorization_ttl_seconds=300)
+
+    assert backup.name == "hosts.session.bak"
+    assert calls == [("new\n", 300)]
+
+
+def test_authorization_session_cannot_write_an_arbitrary_path(tmp_path: Path) -> None:
+    with pytest.raises(hmg.ElevatedWriteError, match="только в системный hosts"):
+        hmg.write_hosts_elevated(tmp_path / "not-hosts", "new\n", authorization_ttl_seconds=300)
+
+
+def test_source_fetch_worker_collects_results_without_ui_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    sources = [
+        UrlSource("Primary", "https://one.test/hosts"),
+        UrlSource("Unavailable", "https://two.test/hosts"),
+    ]
+
+    def fake_fetch(source: UrlSource) -> dict[str, hmg.HostEntry]:
+        if source.name == "Unavailable":
+            raise TimeoutError("timeout")
+        return {"example.test": hmg.HostEntry("example.test", ["127.0.0.1"])}
+
+    completed: list[tuple[list[object], bool]] = []
+    monkeypatch.setattr(ui_module, "fetch_source", fake_fetch)
+    worker = SourceFetchWorker(sources, None)
+    worker.completed.connect(lambda results, canceled: completed.append((results, canceled)))
+
+    worker.run()
+
+    assert len(completed) == 1
+    results, canceled = completed[0]
+    assert not canceled
+    assert len(results) == 2
+    assert results[0].succeeded  # type: ignore[attr-defined]
+    assert results[1].error == "timeout"  # type: ignore[attr-defined]
 
 
 def test_side_by_side_diff_tags_only_actual_changed_lines() -> None:

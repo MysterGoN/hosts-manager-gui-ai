@@ -19,6 +19,7 @@ from pathlib import Path, PurePath
 from typing import Any
 
 from hmg.sources import system_ssl_context
+from hmg.tracing import traced
 
 REPOSITORY = "MysterGoN/hosts-manager-gui-ai"
 LATEST_RELEASE_API_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
@@ -148,6 +149,7 @@ def parse_release_payload(payload: Any) -> ReleaseInfo:
     )
 
 
+@traced("updater.fetch_latest_release")
 def fetch_latest_release(timeout: float = 15.0) -> ReleaseInfo:
     request = urllib.request.Request(
         LATEST_RELEASE_API_URL,
@@ -217,6 +219,7 @@ def checksum_for_asset(checksums: str, asset_name: str) -> str:
     raise ValueError(f"В SHA256SUMS нет контрольной суммы для {asset_name}")
 
 
+@traced("updater.prepare_update")
 def prepare_update(release: ReleaseInfo, system: str | None = None) -> PreparedUpdate:
     installer_name = installer_asset_name(system)
     archive_name = archive_asset_name(system)
@@ -258,6 +261,7 @@ def prepare_update(release: ReleaseInfo, system: str | None = None) -> PreparedU
     return PreparedUpdate(release, installer_path, archive_path, checksums_path)
 
 
+@traced("updater.download_asset")
 def download_asset(asset: ReleaseAsset, maximum_bytes: int, timeout: float = 30.0) -> bytes:
     if asset.size > maximum_bytes:
         raise ValueError(f"Asset {asset.name!r} превышает допустимый размер")

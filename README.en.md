@@ -127,7 +127,10 @@ directory for the current platform. The Settings section allows you to select:
 - the maximum size of a single file (`KB`, `MB`, `GB`);
 - the number of rotated files;
 - the log retention period (`min`, `h`, `d`);
-- whether file logging is enabled in development mode.
+- whether file logging is enabled in development mode;
+- the privileged-session lifetime for repeated `hosts` writes (5 minutes by
+  default, `0` requests elevation every time, maximum 60 minutes);
+- a separate tracing mode that measures significant logical nodes.
 
 When the data directory changes, the application offers to copy existing files.
 The exact system paths are displayed in the Settings window and determined with
@@ -137,6 +140,17 @@ overridden with `HMG_CONFIG_DIR`, `HMG_DATA_DIR`, and `HMG_LOG_DIR`.
 In development mode, logs are written only to stdout by default. In the packaged
 application, the console is disabled and JSON logs are written to the rotating
 `hmg.log` file.
+Tracing can also be forced with `HMG_TRACE=1`. It adds `trace_started` and
+`trace_finished` events to the same JSON output, including the node name,
+execution thread, status, and `duration_ms`. Normal mode does not emit these
+events.
+
+The application never stores an administrator login or password. When the
+privileged-session lifetime is greater than zero, the system elevation prompt
+starts a minimal elevated helper. It can only write the system `hosts` file, is
+reachable through a one-time local channel, and exits when the timer expires or
+the application closes. Changing the lifetime immediately closes the current
+session.
 
 ## Import
 
@@ -167,8 +181,10 @@ use Load from URL in the main window to run an operation. Standard hosts format
 - Synchronize also removes relationships that disappeared from a source.
 - Replace Entirely builds the list only from enabled sources.
 
-Sources are loaded sequentially, and the operation can be canceled between
-sources. After loading, the application shows a separate result or error for
+Sources are loaded sequentially on a background worker, so a timeout or an
+unavailable endpoint does not block the interface. The operation can be canceled
+between sources; the current request first finishes with a response or timeout.
+After loading, the application shows a separate result or error for
 every URL and an overall change preview. Local state changes only after explicit
 confirmation. A failed source is skipped without removing its previous
 relationships; Replace Entirely is blocked if any source fails.
@@ -204,6 +220,11 @@ contextual actions for editing, moving, bulk enabling/disabling, and deleting
 records. The footer status shows how many domains are saved in local state but
 not yet applied to the system `hosts` file. Full domain and origin values are
 available through tooltips and context-menu copying.
+
+Search starts after a short typing pause so the table is not rebuilt for every
+intermediate character. In tracing mode, `search.filter_entries`,
+`search.apply_visibility`, and `search.refresh_and_render_table` separate
+filtering, visibility updates for existing rows, and a full Qt table rebuild.
 
 The `hosts` preview identifies added, removed, modified, and service lines
 separately. `Generated at` changes are excluded from user-facing statistics.

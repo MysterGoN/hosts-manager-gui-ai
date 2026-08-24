@@ -12,6 +12,7 @@ import truststore
 
 from hmg.core import HostEntry, parse_hosts_line, parse_import_text, state_path, validate_domain
 from hmg.logging import get_logger
+from hmg.tracing import traced
 
 logger = get_logger(__name__)
 MAX_SOURCE_BYTES = 10 * 1024 * 1024
@@ -80,6 +81,7 @@ def validate_source_url(value: str) -> str:
     return url
 
 
+@traced("sources.load_state")
 def load_sources_state() -> tuple[list[UrlSource], Origins]:
     path = sources_state_path()
     if not path.exists():
@@ -113,6 +115,7 @@ def load_sources_state() -> tuple[list[UrlSource], Origins]:
         return [], {}
 
 
+@traced("sources.save_state")
 def save_sources_state(sources: list[UrlSource], origins: Origins) -> None:
     path = sources_state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -171,6 +174,7 @@ def clone_entries(entries: dict[str, HostEntry]) -> dict[str, HostEntry]:
     }
 
 
+@traced("sources.apply_source")
 def apply_source(
     entries: dict[str, HostEntry],
     origins: Origins,
@@ -254,6 +258,7 @@ def replace_from_sources(
     return entries, origins
 
 
+@traced("sources.prepare_update")
 def prepare_sources_update(
     entries: dict[str, HostEntry],
     origins: Origins,
@@ -283,6 +288,7 @@ def prepare_sources_update(
     return candidate_entries, candidate_origins
 
 
+@traced("sources.summarize_changes")
 def summarize_source_changes(
     before_entries: dict[str, HostEntry],
     before_origins: Origins,
@@ -308,6 +314,7 @@ def summarize_source_changes(
     )
 
 
+@traced("sources.parse_response")
 def parse_url_source_text(text: str) -> dict[str, HostEntry]:
     if not text.strip():
         raise ValueError("Источник вернул пустой ответ")
@@ -331,6 +338,7 @@ def system_ssl_context() -> ssl.SSLContext:
     return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
 
 
+@traced("sources.fetch")
 def fetch_source(source: UrlSource, timeout: float = 15.0) -> dict[str, HostEntry]:
     request = urllib.request.Request(
         validate_source_url(source.url),

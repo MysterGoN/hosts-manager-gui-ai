@@ -5,6 +5,7 @@ import pytest
 
 from hmg.logging import cleanup_old_logs, configure_logging, get_logger
 from hmg.settings import AppSettings
+from hmg.tracing import configure_tracing, traced
 
 
 def make_settings(tmp_path: Path, **overrides: object) -> AppSettings:
@@ -77,3 +78,25 @@ def test_old_rotated_logs_are_removed_by_retention_period(tmp_path: Path) -> Non
     cleanup_old_logs(log_dir, 30 * 24 * 60 * 60)
 
     assert not old_log.exists()
+
+
+def test_tracing_mode_logs_logical_node_duration(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_logging(make_settings(tmp_path), packaged=False)
+
+    @traced("tests.sample_node")
+    def sample() -> int:
+        return 42
+
+    configure_tracing(True)
+    try:
+        assert sample() == 42
+    finally:
+        configure_tracing(False)
+
+    output = capsys.readouterr().out
+    assert '"event": "trace_started"' in output
+    assert '"node": "tests.sample_node"' in output
+    assert '"duration_ms":' in output
