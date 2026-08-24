@@ -1,6 +1,6 @@
 [project]
 name = "hosts-manager-gui"
-version = "0.7.0"
+version = "0.7.1"
 description = "Cross-platform GUI utility for managing hosts records."
 readme = "README.md"
 requires-python = ">=3.11"

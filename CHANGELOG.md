@@ -1,3 +1,9 @@
+## v0.7.1 (2026-08-24)
+
+### Fix
+
+- avoid terminating Windows test process
+
 ## v0.7.0 (2026-08-24)
 
 ### Feat
