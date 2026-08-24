@@ -1,5 +1,4 @@
 import json
-import os
 import socket
 import threading
 from pathlib import Path
@@ -25,7 +24,7 @@ def test_privileged_helper_writes_only_its_system_hosts_target(
 
     result: list[int] = []
     worker = threading.Thread(
-        target=lambda: result.append(helper.serve(port, token_path, 10, os.getpid())),
+        target=lambda: result.append(helper.serve(port, token_path, 10)),
     )
     worker.start()
     connection, _address = listener.accept()
@@ -51,4 +50,4 @@ def test_privileged_helper_writes_only_its_system_hosts_target(
 
 
 def test_privileged_helper_rejects_excessive_session_lifetime(tmp_path: Path) -> None:
-    assert helper.serve(1234, tmp_path / "missing", helper.MAX_TTL_SECONDS + 1, os.getpid()) == 2
+    assert helper.serve(1234, tmp_path / "missing", helper.MAX_TTL_SECONDS + 1) == 2

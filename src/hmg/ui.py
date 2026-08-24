@@ -123,7 +123,7 @@ from hmg.sources import (
     summarize_source_changes,
     validate_source_url,
 )
-from hmg.tracing import configure_tracing, trace, traced
+from hmg.tracing import configure_tracing, traced
 from hmg.updater import (
     PreparedUpdate,
     ReleaseInfo,
@@ -1116,6 +1116,32 @@ class UpdatePrepareWorker(QThread):
             self.failed.emit(str(exc))
 
 
+@traced("url_sources.fetch_all")
+def fetch_url_sources(
+    sources: list[UrlSource],
+    cancel_requested: Callable[[], bool],
+    result_callback: Callable[[SourceFetchResult, int, int], None],
+) -> tuple[list[SourceFetchResult], bool]:
+    results: list[SourceFetchResult] = []
+    for index, source in enumerate(sources, start=1):
+        if cancel_requested():
+            break
+        try:
+            entries = fetch_source(source)
+            result = SourceFetchResult(source, entries=entries)
+        except Exception as exc:
+            logger.warning(
+                "url_source_fetch_failed",
+                source_id=source.id,
+                source_name=source.name,
+                error=str(exc),
+            )
+            result = SourceFetchResult(source, error=str(exc))
+        results.append(result)
+        result_callback(result, index, len(sources))
+    return results, cancel_requested()
+
+
 class SourceFetchWorker(QThread):
     source_completed = Signal(object, int, int)
     completed = Signal(object, bool)
@@ -1129,25 +1155,12 @@ class SourceFetchWorker(QThread):
         self._cancel_requested.set()
 
     def run(self) -> None:
-        results: list[SourceFetchResult] = []
-        with trace("url_sources.fetch_all", sources_count=len(self.sources)):
-            for index, source in enumerate(self.sources, start=1):
-                if self._cancel_requested.is_set():
-                    break
-                try:
-                    entries = fetch_source(source)
-                    result = SourceFetchResult(source, entries=entries)
-                except Exception as exc:
-                    logger.warning(
-                        "url_source_fetch_failed",
-                        source_id=source.id,
-                        source_name=source.name,
-                        error=str(exc),
-                    )
-                    result = SourceFetchResult(source, error=str(exc))
-                results.append(result)
-                self.source_completed.emit(result, index, len(self.sources))
-        self.completed.emit(results, self._cancel_requested.is_set())
+        results, canceled = fetch_url_sources(
+            self.sources,
+            self._cancel_requested.is_set,
+            self.source_completed.emit,
+        )
+        self.completed.emit(results, canceled)
 
 
 class UpdateDialog(QDialog):

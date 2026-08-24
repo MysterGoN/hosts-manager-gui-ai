@@ -56,7 +56,7 @@ def _read_message(stream: MessageStream) -> dict[str, Any]:
 
 
 def _helper_command(port: int, token_path: Path, ttl_seconds: int) -> list[str]:
-    arguments = ["--elevated-helper", str(port), str(token_path), str(ttl_seconds), str(os.getpid())]
+    arguments = ["--elevated-helper", str(port), str(token_path), str(ttl_seconds)]
     if is_packaged():
         return [sys.executable, *arguments]
     return [sys.executable, "-m", "hmg.privileged_helper", *arguments[1:]]
